@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "EpiDuck",
+  "version": "60.0",
+  "description": "Auto-play, velocità configurabile, qualità per dominio, auto-skip, transcript, Estrai Corso → MD/Notion/AI.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://api.notion.com/*",
+    "https://api.anthropic.com/*",
+    "https://cms.epicode.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon-toolbar.svg"
+  },
+  "icons": {
+    "16": "icon-toolbar.svg",
+    "32": "icon-toolbar.svg",
+    "48": "icon-toolbar.svg",
+    "128": "icon.svg"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.epicode.edu.mt/*"],
+      "js": ["epicode.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["*://player.vimeo.com/*"],
+      "js": ["vimeo-main.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://player.vimeo.com/*"],
+      "js": ["vimeo.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["vimeo-main.js"],
+      "matches": ["*://player.vimeo.com/*"]
+    },
+    {
+      "resources": ["popup.html", "popup.js", "icon.svg", "icon-toolbar.svg"],
+      "matches": ["*://*.epicode.edu.mt/*"]
+    }
+  ]
+}

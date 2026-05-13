@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>EpiDuck</title>
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<style>
+  body {
+    font-family: sans-serif;
+    font-size: 13px;
+    padding: 14px;
+    width: 280px;
+    color: #222;
+  }
+  h2 {
+    font-size: 14px;
+    color: #CB2376;
+    margin: 0 0 12px 0;
+    border-bottom: 2px solid #CB2376;
+    padding-bottom: 6px;
+  }
+  label {
+    display: block;
+    font-weight: bold;
+    margin-bottom: 3px;
+    margin-top: 10px;
+  }
+  input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 7px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: monospace;
+  }
+  .hint {
+    font-size: 10px;
+    color: #888;
+    margin-top: 3px;
+  }
+  button {
+    margin-top: 14px;
+    width: 100%;
+    background: #CB2376;
+    color: white;
+    border: none;
+    padding: 9px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    font-size: 13px;
+  }
+  button:hover { background: #a81c60; }
+  #status {
+    margin-top: 8px;
+    font-size: 11px;
+    text-align: center;
+    min-height: 16px;
+    color: #2ecc71;
+  }
+  #version {
+    position: absolute;
+    bottom: 6px;
+    right: 10px;
+    font-size: 9px;
+    color: #aaa;
+    font-family: monospace;
+  }
+  body { position: relative; padding-bottom: 22px; }
+</style>
+</head>
+<body>
+<h2><img src="icon.svg" width="20" height="20" style="vertical-align:middle;margin-right:6px;">EpiDuck</h2>
+
+<div id="enabled-row" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#f8f4ff;border:1px solid #e0d5f5;border-radius:6px;margin-bottom:14px;">
+  <label class="switch" style="position:relative;display:inline-block;width:42px;height:22px;margin:0;flex-shrink:0;">
+    <input type="checkbox" id="enabled-toggle" style="opacity:0;width:0;height:0;padding:0;border:0;">
+    <span id="enabled-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#ccc;border-radius:22px;transition:.2s;"></span>
+  </label>
+  <div style="flex:1;">
+    <div style="font-weight:bold;font-size:12px;color:#222;">Estensione attiva</div>
+    <div id="enabled-state" style="font-size:10px;color:#888;">—</div>
+  </div>
+</div>
+<style>
+  #enabled-slider::before { content: ''; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: .2s; }
+  #enabled-toggle:checked + #enabled-slider { background: #2ecc71; }
+  #enabled-toggle:checked + #enabled-slider::before { transform: translateX(20px); }
+</style>
+
+<label for="notion-key">Notion API Key</label>
+<input type="password" id="notion-key" placeholder="secret_xxxxxxxxxxxxxxxx">
+<div class="hint">Integration token da notion.so/my-integrations</div>
+
+<label for="notion-page">Page ID parent (per Estrai corso)</label>
+<input type="text" id="notion-page" placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
+<div class="hint">ID della pagina Notion sotto cui creare i corsi estratti (32 hex dall'URL)</div>
+
+<label for="anthropic-key">Anthropic API Key (opzionale, per AI rework)</label>
+<input type="password" id="anthropic-key" placeholder="sk-ant-xxxxxxxxxxxxxxxx">
+<div class="hint">Da console.anthropic.com — usata con Sonnet 4.6 per ottimizzare i riassunti</div>
+
+<button id="save-btn">Salva impostazioni</button>
+<div id="status"></div>
+
+<div id="version"></div>
+<script src="popup.js"></script>
+</body>
+</html>
