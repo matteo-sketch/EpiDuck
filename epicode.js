@@ -65,6 +65,94 @@
     let noVideoDeadline = 0;
     let isExtracting = false;
 
+    // ---------- Auto error capture + bug report ----------
+    const ERROR_BUFFER_KEY = 'epicode_error_buffer';
+    const MAX_ERRORS = 50;
+    const REPO_ISSUES_URL = 'https://github.com/matteo-sketch/EpiDuck/issues/new';
+
+    function bufferError(payload) {
+        try {
+            chrome.storage.local.get([ERROR_BUFFER_KEY], (r) => {
+                const buf = (r[ERROR_BUFFER_KEY] || []);
+                buf.push({ ts: Date.now(), ...payload });
+                while (buf.length > MAX_ERRORS) buf.shift();
+                chrome.storage.local.set({ [ERROR_BUFFER_KEY]: buf });
+            });
+        } catch (_) {}
+    }
+
+    function isOwnError(filename, msg) {
+        const s = `${filename || ''} ${msg || ''}`;
+        return /epicduck|epiduck|epicode\.js|vimeo\.js|vimeo-main\.js|EpicodeFlow/i.test(s);
+    }
+
+    window.addEventListener('error', (e) => {
+        const msg = (e.message || '').slice(0, 200);
+        if (!isOwnError(e.filename, msg)) return;
+        bufferError({
+            type: 'error',
+            msg,
+            file: (e.filename || '').slice(-100),
+            line: e.lineno,
+            col: e.colno,
+            stack: (e.error && e.error.stack ? e.error.stack.slice(0, 500) : null)
+        });
+    });
+
+    window.addEventListener('unhandledrejection', (e) => {
+        const r = e.reason || {};
+        const msg = (r.message || String(r) || '').slice(0, 200);
+        const stack = (r.stack || '').slice(0, 500);
+        if (!isOwnError(stack, msg)) return;
+        bufferError({ type: 'promise', msg, stack });
+    });
+
+    function sanitizeUrl(u) {
+        try {
+            const url = new URL(u);
+            return `${url.origin}${url.pathname}`;
+        } catch (_) { return '[invalid]'; }
+    }
+
+    function openBugReport() {
+        chrome.storage.local.get([ERROR_BUFFER_KEY], (r) => {
+            const errors = (r[ERROR_BUFFER_KEY] || []).slice(-10);
+            let v = '';
+            try { v = chrome.runtime.getManifest().version; } catch (_) {}
+            const ua = navigator.userAgent;
+            const url = sanitizeUrl(location.href);
+            const courseId = getCourseId() || 'n/a';
+            const lessonId = getLessonId() || 'n/a';
+            const status = document.getElementById('m-status')?.innerText || 'n/a';
+            const vidTime = document.getElementById('m-vid-time')?.innerText || 'n/a';
+            const skip = document.getElementById('m-vid-skip')?.innerText || 'n/a';
+            const debug = document.getElementById('m-debug')?.innerText || 'n/a';
+            const errLines = errors.length
+                ? errors.map(e => `- [${new Date(e.ts).toISOString().slice(11,19)}] ${e.type}: ${e.msg}${e.file ? ` (${e.file}:${e.line})` : ''}`).join('\n')
+                : '_nessun errore catturato_';
+            const body = `## Descrizione bug
+<!-- Descrivi cosa è successo e cosa ti aspettavi -->
+
+
+## Context (auto-generato)
+- **EpiDuck**: v${v}
+- **URL**: ${url}
+- **Course**: ${courseId} — **Lesson**: ${lessonId}
+- **Status box**: ${status}
+- **Skip**: ${skip}
+- **Video time**: ${vidTime}
+- **Debug**: ${debug}
+- **Speed user**: ${currentSpeed}x — **Quality**: ${currentQuality}
+- **UA**: ${ua}
+
+## Errori catturati (ultimi 10)
+${errLines}
+`;
+            const issueUrl = `${REPO_ISSUES_URL}?labels=bug&body=${encodeURIComponent(body)}`;
+            window.open(issueUrl, '_blank');
+        });
+    }
+
     // ---------- Auto-quality drop a velocità alte ----------
     const AUTO_QUALITY_SPEED_THRESHOLD = 8;
     const AUTO_QUALITY_DROP = '360p';
@@ -1855,7 +1943,7 @@
     }
     buildExtractPanel();
 
-    // ---------- Version footer in box ----------
+    // ---------- Version footer + Bug report in box ----------
     (function addVersionFooter() {
         const body = document.getElementById('m-body');
         if (!body || document.getElementById('m-version-footer')) return;
@@ -1863,9 +1951,14 @@
         v.id = 'm-version-footer';
         let ver = '';
         try { ver = chrome.runtime.getManifest().version; } catch (_) {}
-        v.textContent = `EpiDuck v${ver}`;
-        v.style.cssText = 'text-align:right;font-size:9px;color:#3d2b6e;font-family:monospace;margin-top:6px;padding-top:4px;border-top:1px dashed #2a1054;';
+        v.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-top:6px;padding-top:4px;border-top:1px dashed #2a1054;font-family:monospace;';
+        v.innerHTML = `
+            <button id="m-bug" title="Segnala bug" style="background:none;border:none;color:#ef4444;font-size:11px;cursor:pointer;padding:0;font-family:monospace;">🐛 Segnala bug</button>
+            <span style="font-size:9px;color:#3d2b6e;">EpiDuck v${ver}</span>
+        `;
         body.appendChild(v);
+        const bug = document.getElementById('m-bug');
+        if (bug) bug.onclick = openBugReport;
     })();
     } // end bootEpiDuck
 })();
