@@ -125,12 +125,14 @@
         document.dispatchEvent(new CustomEvent('__epicodeflow-speed', { detail: speed }));
     }
 
-    function applySpeed() {
+    let lastAppliedSpeed = null;
+    function applySpeed(force = false) {
         if (!video) return;
+        if (!force && lastAppliedSpeed === currentSpeed) return;
+        lastAppliedSpeed = currentSpeed;
         try {
             applySpeedToMainWorld(currentSpeed);
-            video.playbackRate = currentSpeed;
-            video.defaultPlaybackRate = currentSpeed;
+            // Niente write diretto qui: il setRateSafe del MAIN world gestisce no-op check + rate limit
         } catch (e) { console.warn(TAG, 'applySpeed err', e); }
     }
 
@@ -158,11 +160,12 @@
         applySpeed();
         attachTranscript(v);
 
-        v.addEventListener('play',           () => { applySpeed(); postInfo({ event: 'play' }); }, true);
+        v.addEventListener('play',           () => { applySpeed(true); postInfo({ event: 'play' }); }, true);
         v.addEventListener('pause',          () => postInfo({ event: 'pause' }), true);
-        v.addEventListener('loadedmetadata', () => { applySpeed(); postInfo({ event: 'loadedmetadata' }); }, true);
-        v.addEventListener('ratechange',     () => { applySpeed(); postInfo({ event: 'ratechange' }); }, true);
-        v.addEventListener('timeupdate',     () => { applySpeed(); postInfo({ event: 'timeupdate' }); }, true);
+        v.addEventListener('loadedmetadata', () => { applySpeed(true); postInfo({ event: 'loadedmetadata' }); }, true);
+        v.addEventListener('ratechange',     () => { applySpeed(true); postInfo({ event: 'ratechange' }); }, true);
+        // timeupdate: solo postInfo per status box, NIENTE re-apply speed (era 4-10 chiamate/sec a velocità alte)
+        v.addEventListener('timeupdate',     () => postInfo({ event: 'timeupdate' }), true);
         v.addEventListener('ended',          () => postInfo({ event: 'ended' }), true);
 
         // PATCH: synthetic ended near end-of-video (Vimeo HLS spesso non emette 'ended')
@@ -179,7 +182,7 @@
         if (!d || typeof d !== 'object' || !d.__epicodeFlow) return;
         if (d.type === 'set-speed' && typeof d.speed === 'number') {
             currentSpeed = d.speed;
-            applySpeed();
+            applySpeed(true); // force: lastAppliedSpeed cambia, va riapplicato
         }
     });
 
@@ -188,11 +191,11 @@
         try { document.dispatchEvent(new CustomEvent('__epicodeflow-enable')); } catch (_) {}
         const v = findVideo(document);
         if (v && v !== video) attach(v);
-        applySpeed();
+        applySpeed(); // no-op se già applicata (lastAppliedSpeed check)
         postInfo();
         enforceTrackModes();
         if (!transcriptBtnClicked) clickVimeoTranscriptButton();
-    }, 400);
+    }, 800);
 
     } // end bootVimeoScript
 })();
