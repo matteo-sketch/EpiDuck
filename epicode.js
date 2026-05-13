@@ -71,6 +71,64 @@
     let autoQualityActive = false;
     let lastSpeedForQualityCheck = currentSpeed;
 
+    // ---------- Hold-to-speed (keyboard) ----------
+    const HOLD_KEY = 'Shift';
+    const HOLD_MULTIPLIER = 2;
+    let holdActive = false;
+
+    function isTypingTarget(el) {
+        if (!el) return false;
+        const tag = el.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+        if (el.isContentEditable) return true;
+        return false;
+    }
+
+    function sendSpeedDirect(speed) {
+        const iframe = document.querySelector('iframe[src*="vimeo.com"]');
+        if (iframe) {
+            try { iframe.contentWindow.postMessage({ __epicodeFlow: true, type: 'set-speed', speed }, '*'); } catch (_) {}
+        }
+        const v = (typeof findMeetingVideo === 'function') ? findMeetingVideo() : null;
+        if (v) { try { v.playbackRate = speed; } catch (_) {} }
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.repeat) return;
+        if (e.key !== HOLD_KEY) return;
+        if (isTypingTarget(e.target)) return;
+        if (holdActive) return;
+        holdActive = true;
+        const boost = Math.max(0.25, Math.min(16, currentSpeed * HOLD_MULTIPLIER));
+        sendSpeedDirect(boost);
+        const status = document.getElementById('m-status');
+        if (status) { status.innerText = `⚡ HOLD ${boost}x`; status.style.color = '#facc15'; }
+    }, true);
+
+    document.addEventListener('keyup', (e) => {
+        if (e.key !== HOLD_KEY) return;
+        if (!holdActive) return;
+        holdActive = false;
+        // Ripristina effective (rispetta cap se tracked)
+        if (typeof ensureEffectiveSpeed === 'function') {
+            lastEffectiveSpeed = null;
+            ensureEffectiveSpeed();
+        } else {
+            sendSpeedDirect(currentSpeed);
+        }
+    }, true);
+
+    // Window blur: rilascia hold (evita stuck quando alt-tab con tasto premuto)
+    window.addEventListener('blur', () => {
+        if (holdActive) {
+            holdActive = false;
+            if (typeof ensureEffectiveSpeed === 'function') {
+                lastEffectiveSpeed = null;
+                ensureEffectiveSpeed();
+            }
+        }
+    });
+
     // ---------- Widget completamento Epicode (in alto a destra) ----------
     function findEpicodeCompletionPctEl() {
         const W = window.innerWidth;
