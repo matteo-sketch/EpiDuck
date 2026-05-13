@@ -218,7 +218,18 @@ ${errLines}
     });
 
     // ---------- Widget completamento Epicode (in alto a destra) ----------
-    function findEpicodeCompletionPctEl() {
+    // Cache: l'elemento è lo stesso fra tick, validare prima di ri-cercare nel DOM
+    let _cachedPctEl = null;
+
+    function _validatePctEl(el) {
+        if (!el || !el.isConnected) return false;
+        const txt = (el.innerText || '').trim();
+        if (!/^\d{1,3}(?:\.\d+)?%$/.test(txt)) return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    }
+
+    function _searchPctEl() {
         const W = window.innerWidth;
         const ps = document.querySelectorAll('p');
         for (const p of ps) {
@@ -226,15 +237,26 @@ ${errLines}
             if (!/^\d{1,3}(?:\.\d+)?%$/.test(txt)) continue;
             const r = p.getBoundingClientRect();
             if (r.width === 0 || r.height === 0) continue;
-            if (r.y > 400) continue;
-            if (r.x < W * 0.4) continue;
+            // Tolleranza posizione: in viewport, parte alta-destra ma non rigida
+            if (r.y > 600) continue;
+            if (r.x < W * 0.3) continue;
             const parent = p.parentElement;
             if (!parent) continue;
-            // Parent dovrebbe avere anche una progress bar (div fratello con altro div figlio)
-            if (parent.querySelector('div > div')) return p;
+            // Parent ha progress bar (div annidato) o icona/elemento accanto
+            const hasProgressBar = !!parent.querySelector('div > div');
+            const siblingsCount = parent.children.length;
+            if (hasProgressBar || siblingsCount >= 2) return p;
         }
         return null;
     }
+
+    function findEpicodeCompletionPctEl() {
+        if (_validatePctEl(_cachedPctEl)) return _cachedPctEl;
+        _cachedPctEl = _searchPctEl();
+        return _cachedPctEl;
+    }
+
+    function invalidatePctElCache() { _cachedPctEl = null; }
 
     function readEpicodeCompletionPct() {
         const el = findEpicodeCompletionPctEl();
@@ -391,11 +413,30 @@ ${errLines}
     let meetingLastLessonId = null;
 
     function findMeetingVideo() {
-        const v = document.querySelector('.video-js video, video-js video');
-        if (!v) return null;
-        const src = v.currentSrc || v.src || '';
-        if (!src || src.includes('vimeo.com')) return null;
-        return v;
+        // Strategie multiple: video.js classico, video-js custom element, video con src Epicode CDN
+        const candidates = [
+            ...document.querySelectorAll('.video-js video, video-js video'),
+            ...document.querySelectorAll('video[src*="cdn.epicode.com"], video[src*="lms/recordings"]')
+        ];
+        for (const v of candidates) {
+            const src = v.currentSrc || v.src || '';
+            if (!src) continue;
+            if (src.includes('vimeo.com')) continue;
+            return v;
+        }
+        return null;
+    }
+
+    // Trova content-next-button con fallback (testid → aria-label → text match)
+    function findContentNextButton() {
+        let btn = findContentNextButton();
+        if (btn) return btn;
+        const buttons = [...document.querySelectorAll('button, [role="button"]')];
+        btn = buttons.find(b => {
+            const lbl = (b.getAttribute('aria-label') || b.textContent || '').trim().toLowerCase();
+            return lbl === 'next' || lbl === 'successivo' || lbl === 'prossimo';
+        });
+        return btn || null;
     }
 
     async function ensureMeetingDetail() {
@@ -1183,7 +1224,7 @@ ${errLines}
         }
 
         // 2. Pulsante Next: forza-abilita (rimuove disabled + Mui-disabled) e clicca
-        const btn = document.querySelector('[data-testid="content-next-button"]');
+        const btn = findContentNextButton();
         if (btn) {
             btn.disabled = false;
             btn.removeAttribute('disabled');
@@ -1375,7 +1416,7 @@ ${errLines}
         const currentId = getLessonId() || '?';
         const nodeCount = getSidebarNodes().length;
         const nextEl    = getNextNodeEl();
-        const btnEl     = document.querySelector('[data-testid="content-next-button"]');
+        const btnEl     = findContentNextButton();
         if (debug) debug.innerText =
             `ID:${currentId} | nodi:${nodeCount} | next:${nextEl ? getNodeId(nextEl) : '✗'} | btn:${btnEl ? (btnEl.disabled ? 'dis' : 'OK') : '✗'}`;
 
@@ -1406,6 +1447,7 @@ ${errLines}
                 pageLoadTs = Date.now();
                 serverWatchdog = { lastPct: -1, lastChangeTs: 0 };
                 autoQualityActive = false;
+                invalidatePctElCache();
                 setTimeout(checkAutoQualityDrop, 1500);
                 ensureCurriculum();
                 meetingDetailCache = { lessonId: null, detail: null, inflight: null };
