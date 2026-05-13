@@ -65,6 +65,12 @@
     let noVideoDeadline = 0;
     let isExtracting = false;
 
+    // ---------- Auto-quality drop a velocità alte ----------
+    const AUTO_QUALITY_SPEED_THRESHOLD = 8;
+    const AUTO_QUALITY_DROP = '360p';
+    let autoQualityActive = false;
+    let lastSpeedForQualityCheck = currentSpeed;
+
     // ---------- Widget completamento Epicode (in alto a destra) ----------
     function findEpicodeCompletionPctEl() {
         const W = window.innerWidth;
@@ -396,6 +402,7 @@
         renderSpeedButtons();
         lastEffectiveSpeed = null;
         ensureEffectiveSpeed();
+        checkAutoQualityDrop();
     }
 
     function renderQualityButtons() {
@@ -421,6 +428,7 @@
         currentQuality = q;
         localStorage.setItem(QUALITY_KEY, q);
         qualityApplied = false;
+        autoQualityActive = false; // utente sceglie esplicitamente → disattiva auto-drop
         renderQualityButtons();
         const iframe = document.querySelector('iframe[src*="vimeo.com"]');
         if (iframe) {
@@ -1061,17 +1069,37 @@
 
     function applyQuality(iframe) {
         if (qualityApplied) return;
-        vimeoCmd(iframe, 'setQuality', currentQuality);
+        const targetQuality = autoQualityActive ? AUTO_QUALITY_DROP : currentQuality;
+        vimeoCmd(iframe, 'setQuality', targetQuality);
         qualityApplied = true;
         updateVinfo();
+    }
+
+    function checkAutoQualityDrop() {
+        const iframe = document.querySelector('iframe[src*="vimeo.com"]');
+        // Basato su user-selected speed (non effective): evita oscillazioni quando watchdog throttle
+        const shouldDrop = currentSpeed >= AUTO_QUALITY_SPEED_THRESHOLD && currentQuality !== AUTO_QUALITY_DROP && currentQuality !== '240p';
+        if (shouldDrop && !autoQualityActive) {
+            autoQualityActive = true;
+            if (iframe) { vimeoCmd(iframe, 'setQuality', AUTO_QUALITY_DROP); qualityApplied = true; }
+            updateVinfo();
+        } else if (!shouldDrop && autoQualityActive) {
+            autoQualityActive = false;
+            if (iframe) { vimeoCmd(iframe, 'setQuality', currentQuality); qualityApplied = true; }
+            updateVinfo();
+        }
+        lastSpeedForQualityCheck = currentSpeed;
     }
 
     function updateVinfo() {
         const vinfo = document.getElementById('m-vinfo');
         if (!vinfo) return;
-        const speedOk = videoState.playbackRate >= currentSpeed * 0.8;
+        const eff = getEffectiveSpeed();
+        const speedOk = videoState.playbackRate >= eff * 0.8;
         const speedLbl = speedOk ? `${currentSpeed}x ✓` : `${currentSpeed}x ⏳`;
-        const qLabel   = qualityApplied ? `${currentQuality} ✓` : `${currentQuality} ⏳`;
+        const qLabel = autoQualityActive
+            ? `${AUTO_QUALITY_DROP} (auto)`
+            : (qualityApplied ? `${currentQuality} ✓` : `${currentQuality} ⏳`);
         vinfo.style.color = (speedOk && qualityApplied) ? '#4ade80' : '#f97316';
         vinfo.innerText = `${speedLbl} | ${qLabel}`;
     }
@@ -1231,6 +1259,8 @@
                 pageEntryServerPct = null;
                 pageLoadTs = Date.now();
                 serverWatchdog = { lastPct: -1, lastChangeTs: 0 };
+                autoQualityActive = false;
+                setTimeout(checkAutoQualityDrop, 1500);
                 ensureCurriculum();
                 meetingDetailCache = { lessonId: null, detail: null, inflight: null };
                 ensureMeetingDetail();
