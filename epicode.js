@@ -37,8 +37,9 @@
     const QUALITY_KEY = `epicode_quality_${location.hostname}`;
     const SPEED_KEY   = `epicode_speed_${location.hostname}`;
 
-    let currentSpeed   = parseFloat(localStorage.getItem(SPEED_KEY) || localStorage.getItem('epicode_speed') || '1');
-    let currentQuality = localStorage.getItem(QUALITY_KEY) || '360p';
+    // Default ottimizzato per studio rapido: 16x + 240p (utente può cambiare e viene memorizzato)
+    let currentSpeed   = parseFloat(localStorage.getItem(SPEED_KEY) || localStorage.getItem('epicode_speed') || '16');
+    let currentQuality = localStorage.getItem(QUALITY_KEY) || '240p';
 
     const startTime = Date.now();
     let scriptActive   = true;
@@ -65,8 +66,171 @@
     let noVideoDeadline = 0;
     let isExtracting = false;
 
+    // ---------- Auto error capture + bug report ----------
+    const ERROR_BUFFER_KEY = 'epicode_error_buffer';
+    const MAX_ERRORS = 50;
+    const REPO_ISSUES_URL = 'https://github.com/matteo-sketch/EpiDuck/issues/new';
+
+    function bufferError(payload) {
+        try {
+            chrome.storage.local.get([ERROR_BUFFER_KEY], (r) => {
+                const buf = (r[ERROR_BUFFER_KEY] || []);
+                buf.push({ ts: Date.now(), ...payload });
+                while (buf.length > MAX_ERRORS) buf.shift();
+                chrome.storage.local.set({ [ERROR_BUFFER_KEY]: buf });
+            });
+        } catch (_) {}
+    }
+
+    function isOwnError(filename, msg) {
+        const s = `${filename || ''} ${msg || ''}`;
+        return /epicduck|epiduck|epicode\.js|vimeo\.js|vimeo-main\.js|EpicodeFlow/i.test(s);
+    }
+
+    window.addEventListener('error', (e) => {
+        const msg = (e.message || '').slice(0, 200);
+        if (!isOwnError(e.filename, msg)) return;
+        bufferError({
+            type: 'error',
+            msg,
+            file: (e.filename || '').slice(-100),
+            line: e.lineno,
+            col: e.colno,
+            stack: (e.error && e.error.stack ? e.error.stack.slice(0, 500) : null)
+        });
+    });
+
+    window.addEventListener('unhandledrejection', (e) => {
+        const r = e.reason || {};
+        const msg = (r.message || String(r) || '').slice(0, 200);
+        const stack = (r.stack || '').slice(0, 500);
+        if (!isOwnError(stack, msg)) return;
+        bufferError({ type: 'promise', msg, stack });
+    });
+
+    function sanitizeUrl(u) {
+        try {
+            const url = new URL(u);
+            return `${url.origin}${url.pathname}`;
+        } catch (_) { return '[invalid]'; }
+    }
+
+    function openBugReport() {
+        chrome.storage.local.get([ERROR_BUFFER_KEY], (r) => {
+            const errors = (r[ERROR_BUFFER_KEY] || []).slice(-10);
+            let v = '';
+            try { v = chrome.runtime.getManifest().version; } catch (_) {}
+            const ua = navigator.userAgent;
+            const url = sanitizeUrl(location.href);
+            const courseId = getCourseId() || 'n/a';
+            const lessonId = getLessonId() || 'n/a';
+            const status = document.getElementById('m-status')?.innerText || 'n/a';
+            const vidTime = document.getElementById('m-vid-time')?.innerText || 'n/a';
+            const skip = document.getElementById('m-vid-skip')?.innerText || 'n/a';
+            const debug = document.getElementById('m-debug')?.innerText || 'n/a';
+            const errLines = errors.length
+                ? errors.map(e => `- [${new Date(e.ts).toISOString().slice(11,19)}] ${e.type}: ${e.msg}${e.file ? ` (${e.file}:${e.line})` : ''}`).join('\n')
+                : '_nessun errore catturato_';
+            const body = `## Descrizione bug
+<!-- Descrivi cosa è successo e cosa ti aspettavi -->
+
+
+## Context (auto-generato)
+- **EpiDuck**: v${v}
+- **URL**: ${url}
+- **Course**: ${courseId} — **Lesson**: ${lessonId}
+- **Status box**: ${status}
+- **Skip**: ${skip}
+- **Video time**: ${vidTime}
+- **Debug**: ${debug}
+- **Speed user**: ${currentSpeed}x — **Quality**: ${currentQuality}
+- **UA**: ${ua}
+
+## Errori catturati (ultimi 10)
+${errLines}
+`;
+            const issueUrl = `${REPO_ISSUES_URL}?labels=bug&body=${encodeURIComponent(body)}`;
+            window.open(issueUrl, '_blank');
+        });
+    }
+
+    // ---------- Auto-quality drop a velocità alte ----------
+    const AUTO_QUALITY_SPEED_THRESHOLD = 8;
+    const AUTO_QUALITY_DROP = '360p';
+    let autoQualityActive = false;
+    let lastSpeedForQualityCheck = currentSpeed;
+
+    // ---------- Hold-to-speed (keyboard) ----------
+    const HOLD_KEY = 'Shift';
+    const HOLD_MULTIPLIER = 2;
+    let holdActive = false;
+
+    function isTypingTarget(el) {
+        if (!el) return false;
+        const tag = el.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+        if (el.isContentEditable) return true;
+        return false;
+    }
+
+    function sendSpeedDirect(speed) {
+        const iframe = document.querySelector('iframe[src*="vimeo.com"]');
+        if (iframe) {
+            try { iframe.contentWindow.postMessage({ __epicodeFlow: true, type: 'set-speed', speed }, '*'); } catch (_) {}
+        }
+        const v = (typeof findMeetingVideo === 'function') ? findMeetingVideo() : null;
+        if (v) { try { v.playbackRate = speed; } catch (_) {} }
+    }
+
+    document.addEventListener('keydown', (e) => {
+        if (e.repeat) return;
+        if (e.key !== HOLD_KEY) return;
+        if (isTypingTarget(e.target)) return;
+        if (holdActive) return;
+        holdActive = true;
+        const boost = Math.max(0.25, Math.min(16, currentSpeed * HOLD_MULTIPLIER));
+        sendSpeedDirect(boost);
+        const status = document.getElementById('m-status');
+        if (status) { status.innerText = `⚡ HOLD ${boost}x`; status.style.color = '#facc15'; }
+    }, true);
+
+    document.addEventListener('keyup', (e) => {
+        if (e.key !== HOLD_KEY) return;
+        if (!holdActive) return;
+        holdActive = false;
+        // Ripristina effective (rispetta cap se tracked)
+        if (typeof ensureEffectiveSpeed === 'function') {
+            lastEffectiveSpeed = null;
+            ensureEffectiveSpeed();
+        } else {
+            sendSpeedDirect(currentSpeed);
+        }
+    }, true);
+
+    // Window blur: rilascia hold (evita stuck quando alt-tab con tasto premuto)
+    window.addEventListener('blur', () => {
+        if (holdActive) {
+            holdActive = false;
+            if (typeof ensureEffectiveSpeed === 'function') {
+                lastEffectiveSpeed = null;
+                ensureEffectiveSpeed();
+            }
+        }
+    });
+
     // ---------- Widget completamento Epicode (in alto a destra) ----------
-    function findEpicodeCompletionPctEl() {
+    // Cache: l'elemento è lo stesso fra tick, validare prima di ri-cercare nel DOM
+    let _cachedPctEl = null;
+
+    function _validatePctEl(el) {
+        if (!el || !el.isConnected) return false;
+        const txt = (el.innerText || '').trim();
+        if (!/^\d{1,3}(?:\.\d+)?%$/.test(txt)) return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    }
+
+    function _searchPctEl() {
         const W = window.innerWidth;
         const ps = document.querySelectorAll('p');
         for (const p of ps) {
@@ -74,15 +238,26 @@
             if (!/^\d{1,3}(?:\.\d+)?%$/.test(txt)) continue;
             const r = p.getBoundingClientRect();
             if (r.width === 0 || r.height === 0) continue;
-            if (r.y > 400) continue;
-            if (r.x < W * 0.4) continue;
+            // Tolleranza posizione: in viewport, parte alta-destra ma non rigida
+            if (r.y > 600) continue;
+            if (r.x < W * 0.3) continue;
             const parent = p.parentElement;
             if (!parent) continue;
-            // Parent dovrebbe avere anche una progress bar (div fratello con altro div figlio)
-            if (parent.querySelector('div > div')) return p;
+            // Parent ha progress bar (div annidato) o icona/elemento accanto
+            const hasProgressBar = !!parent.querySelector('div > div');
+            const siblingsCount = parent.children.length;
+            if (hasProgressBar || siblingsCount >= 2) return p;
         }
         return null;
     }
+
+    function findEpicodeCompletionPctEl() {
+        if (_validatePctEl(_cachedPctEl)) return _cachedPctEl;
+        _cachedPctEl = _searchPctEl();
+        return _cachedPctEl;
+    }
+
+    function invalidatePctElCache() { _cachedPctEl = null; }
 
     function readEpicodeCompletionPct() {
         const el = findEpicodeCompletionPctEl();
@@ -144,9 +319,12 @@
     }
 
     function getEffectiveSpeed() {
-        if (!isTrackedLesson()) return currentSpeed;
-        const cap = isServerStuck() ? MAX_SPEED_TRACKED_STUCK : MAX_SPEED_TRACKED;
-        return Math.min(currentSpeed, cap);
+        // Niente cap automatico: utente sceglie liberamente.
+        // Throttle attivo SOLO se server stuck > 8s (watchdog emergenza).
+        if (isTrackedLesson() && isServerStuck()) {
+            return Math.min(currentSpeed, MAX_SPEED_TRACKED_STUCK);
+        }
+        return currentSpeed;
     }
 
     function ensureEffectiveSpeed() {
@@ -239,11 +417,30 @@
     let meetingLastLessonId = null;
 
     function findMeetingVideo() {
-        const v = document.querySelector('.video-js video, video-js video');
-        if (!v) return null;
-        const src = v.currentSrc || v.src || '';
-        if (!src || src.includes('vimeo.com')) return null;
-        return v;
+        // Strategie multiple: video.js classico, video-js custom element, video con src Epicode CDN
+        const candidates = [
+            ...document.querySelectorAll('.video-js video, video-js video'),
+            ...document.querySelectorAll('video[src*="cdn.epicode.com"], video[src*="lms/recordings"]')
+        ];
+        for (const v of candidates) {
+            const src = v.currentSrc || v.src || '';
+            if (!src) continue;
+            if (src.includes('vimeo.com')) continue;
+            return v;
+        }
+        return null;
+    }
+
+    // Trova content-next-button con fallback (testid → aria-label → text match)
+    function findContentNextButton() {
+        let btn = document.querySelector('[data-testid="content-next-button"]');
+        if (btn) return btn;
+        const buttons = [...document.querySelectorAll('button, [role="button"]')];
+        btn = buttons.find(b => {
+            const lbl = (b.getAttribute('aria-label') || b.textContent || '').trim().toLowerCase();
+            return lbl === 'next' || lbl === 'successivo' || lbl === 'prossimo';
+        });
+        return btn || null;
     }
 
     async function ensureMeetingDetail() {
@@ -354,9 +551,12 @@
         notionSettings.pageId = result.notionPageId || '';
     });
 
-    chrome.storage.onChanged.addListener((changes) => {
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local') return;
         if (changes.notionApiKey) notionSettings.apiKey = changes.notionApiKey.newValue || '';
         if (changes.notionPageId) notionSettings.pageId = changes.notionPageId.newValue || '';
+        // Cross-tab sync: anthropicApiKey usato in runExtract via extractGetSettings (read on demand)
+        // extractionState scritto da una tab visibile alle altre alla prossima azione
     });
 
     // ---------- Controllo velocità ----------
@@ -369,21 +569,19 @@
     function renderSpeedButtons() {
         const row = document.getElementById('m-speed-row');
         if (!row) return;
-        const capped = typeof isTrackedLesson === 'function' && isTrackedLesson();
-        row.innerHTML = `<span style="font-size:10px;color:${capped ? '#f59e0b' : '#a78bfa'};white-space:nowrap;" title="${capped ? 'Tracking server attivo: cap a 4x' : 'Velocità'}">${capped ? 'Vel*:' : 'Vel:'}</span>`;
+        const throttling = typeof isServerStuck === 'function' && isServerStuck();
+        row.innerHTML = `<span style="font-size:10px;color:${throttling ? '#f59e0b' : '#a78bfa'};white-space:nowrap;" title="${throttling ? 'Server tracking fermo: throttle attivo' : 'Velocità riproduzione'}">${throttling ? 'Vel*:' : 'Vel:'}</span>`;
         for (const s of SPEEDS) {
             const btn = document.createElement('button');
             btn.textContent = `${s}x`;
             const active = s === currentSpeed;
-            const willCap = capped && s > MAX_SPEED_TRACKED;
             btn.style.cssText = [
                 'flex:1', 'border:none', 'padding:4px 1px', 'border-radius:3px',
                 'cursor:pointer', 'font-weight:bold', 'font-size:10px',
                 `background:${active ? '#7c3aed' : '#2a1054'}`,
-                `color:${active ? 'white' : (willCap ? '#6b7280' : '#a78bfa')}`,
-                willCap ? 'text-decoration:line-through' : ''
-            ].filter(Boolean).join(';');
-            btn.title = willCap ? 'Velocità limitata a 4x (tracking server)' : '';
+                `color:${active ? 'white' : '#a78bfa'}`
+            ].join(';');
+            btn.title = `Imposta velocità ${s}x`;
             btn.onclick = () => setSpeed(s);
             row.appendChild(btn);
         }
@@ -396,6 +594,7 @@
         renderSpeedButtons();
         lastEffectiveSpeed = null;
         ensureEffectiveSpeed();
+        checkAutoQualityDrop();
     }
 
     function renderQualityButtons() {
@@ -421,6 +620,7 @@
         currentQuality = q;
         localStorage.setItem(QUALITY_KEY, q);
         qualityApplied = false;
+        autoQualityActive = false; // utente sceglie esplicitamente → disattiva auto-drop
         renderQualityButtons();
         const iframe = document.querySelector('iframe[src*="vimeo.com"]');
         if (iframe) {
@@ -686,19 +886,34 @@
         const btn  = document.getElementById('m-toggle');
         const status = document.getElementById('m-status');
         const settings = document.getElementById('m-settings');
+        const header = document.getElementById('m-header');
         if (!body || !btn) return;
         if (boxCollapsed) {
             body.style.display = 'none';
-            btn.textContent    = '▸';
+            btn.textContent    = '▸ APRI';
+            btn.style.background = '#7c3aed';
+            btn.style.color = 'white';
+            btn.style.padding = '3px 8px';
+            btn.style.borderRadius = '4px';
+            btn.style.fontSize = '11px';
+            btn.title = 'Apri pannello EpiDuck';
             if (status) status.style.display = 'none';
             if (settings) settings.style.display = 'none';
+            if (header) header.style.cursor = 'pointer';
             box.style.minWidth = '0';
             box.style.padding = '6px 10px';
         } else {
             body.style.display = 'block';
-            btn.textContent    = '▾';
+            btn.textContent    = '▾ CHIUDI';
+            btn.style.background = '#2a1054';
+            btn.style.color = '#a78bfa';
+            btn.style.padding = '3px 8px';
+            btn.style.borderRadius = '4px';
+            btn.style.fontSize = '10px';
+            btn.title = 'Minimizza pannello';
             if (status) status.style.display = 'block';
             if (settings) settings.style.display = 'inline-block';
+            if (header) header.style.cursor = 'move';
             box.style.minWidth = '230px';
             box.style.padding = '14px';
         }
@@ -824,7 +1039,14 @@
 
     // ---------- API curriculum (cms.epicode.com) ----------
     const LEAF_TYPES = new Set(['embed','meeting','article','markdown','project','openEnded','quiz','nps','course_nps','activity']);
+    const CURRICULUM_TTL_MS = 10 * 60 * 1000; // 10 min
     let curriculumCache = { courseId: null, ordered: [], fetchedAt: 0, inflight: null };
+
+    function curriculumCacheFresh() {
+        return curriculumCache.ordered.length > 0
+            && curriculumCache.fetchedAt > 0
+            && (Date.now() - curriculumCache.fetchedAt) < CURRICULUM_TTL_MS;
+    }
 
     async function fetchCurriculum(courseId) {
         const tok = localStorage.getItem('auth_token');
@@ -853,19 +1075,25 @@
     async function ensureCurriculum() {
         const courseId = getCourseId();
         if (!courseId) return [];
-        if (curriculumCache.courseId === courseId && curriculumCache.ordered.length > 0) return curriculumCache.ordered;
+        if (curriculumCache.courseId === courseId && curriculumCacheFresh()) return curriculumCache.ordered;
         if (curriculumCache.inflight && curriculumCache.courseId === courseId) return curriculumCache.inflight;
+        // Cache scaduta o nuovo corso: invalida e re-fetcha
+        if (curriculumCache.courseId !== courseId) {
+            curriculumCache.ordered = [];
+            curriculumCache.fetchedAt = 0;
+        }
         curriculumCache.courseId = courseId;
         curriculumCache.inflight = (async () => {
             try {
                 const ordered = await fetchCurriculum(courseId);
                 curriculumCache.ordered = ordered;
                 curriculumCache.fetchedAt = Date.now();
-                console.log('[EpicodeFlow] curriculum cache popolata', { courseId, items: ordered.length });
+                console.log('[EpicodeFlow] curriculum cache popolata', { courseId, items: ordered.length, ttlMin: CURRICULUM_TTL_MS / 60000 });
                 return ordered;
             } catch (e) {
                 console.error('[EpicodeFlow] fetchCurriculum errore', e);
                 curriculumCache.ordered = [];
+                curriculumCache.fetchedAt = 0;
                 return [];
             } finally {
                 curriculumCache.inflight = null;
@@ -1029,7 +1257,7 @@
         }
 
         // 2. Pulsante Next: forza-abilita (rimuove disabled + Mui-disabled) e clicca
-        const btn = document.querySelector('[data-testid="content-next-button"]');
+        const btn = findContentNextButton();
         if (btn) {
             btn.disabled = false;
             btn.removeAttribute('disabled');
@@ -1061,17 +1289,37 @@
 
     function applyQuality(iframe) {
         if (qualityApplied) return;
-        vimeoCmd(iframe, 'setQuality', currentQuality);
+        const targetQuality = autoQualityActive ? AUTO_QUALITY_DROP : currentQuality;
+        vimeoCmd(iframe, 'setQuality', targetQuality);
         qualityApplied = true;
         updateVinfo();
+    }
+
+    function checkAutoQualityDrop() {
+        const iframe = document.querySelector('iframe[src*="vimeo.com"]');
+        // Basato su user-selected speed (non effective): evita oscillazioni quando watchdog throttle
+        const shouldDrop = currentSpeed >= AUTO_QUALITY_SPEED_THRESHOLD && currentQuality !== AUTO_QUALITY_DROP && currentQuality !== '240p';
+        if (shouldDrop && !autoQualityActive) {
+            autoQualityActive = true;
+            if (iframe) { vimeoCmd(iframe, 'setQuality', AUTO_QUALITY_DROP); qualityApplied = true; }
+            updateVinfo();
+        } else if (!shouldDrop && autoQualityActive) {
+            autoQualityActive = false;
+            if (iframe) { vimeoCmd(iframe, 'setQuality', currentQuality); qualityApplied = true; }
+            updateVinfo();
+        }
+        lastSpeedForQualityCheck = currentSpeed;
     }
 
     function updateVinfo() {
         const vinfo = document.getElementById('m-vinfo');
         if (!vinfo) return;
-        const speedOk = videoState.playbackRate >= currentSpeed * 0.8;
+        const eff = getEffectiveSpeed();
+        const speedOk = videoState.playbackRate >= eff * 0.8;
         const speedLbl = speedOk ? `${currentSpeed}x ✓` : `${currentSpeed}x ⏳`;
-        const qLabel   = qualityApplied ? `${currentQuality} ✓` : `${currentQuality} ⏳`;
+        const qLabel = autoQualityActive
+            ? `${AUTO_QUALITY_DROP} (auto)`
+            : (qualityApplied ? `${currentQuality} ✓` : `${currentQuality} ⏳`);
         vinfo.style.color = (speedOk && qualityApplied) ? '#4ade80' : '#f97316';
         vinfo.innerText = `${speedLbl} | ${qLabel}`;
     }
@@ -1201,7 +1449,7 @@
         const currentId = getLessonId() || '?';
         const nodeCount = getSidebarNodes().length;
         const nextEl    = getNextNodeEl();
-        const btnEl     = document.querySelector('[data-testid="content-next-button"]');
+        const btnEl     = findContentNextButton();
         if (debug) debug.innerText =
             `ID:${currentId} | nodi:${nodeCount} | next:${nextEl ? getNodeId(nextEl) : '✗'} | btn:${btnEl ? (btnEl.disabled ? 'dis' : 'OK') : '✗'}`;
 
@@ -1231,6 +1479,9 @@
                 pageEntryServerPct = null;
                 pageLoadTs = Date.now();
                 serverWatchdog = { lastPct: -1, lastChangeTs: 0 };
+                autoQualityActive = false;
+                invalidatePctElCache();
+                setTimeout(checkAutoQualityDrop, 1500);
                 ensureCurriculum();
                 meetingDetailCache = { lessonId: null, detail: null, inflight: null };
                 ensureMeetingDetail();
@@ -1747,8 +1998,14 @@
         document.getElementById('m-extract-new').onclick = () => runExtract({ mode: 'new' }).catch(e => showExtractStatus('Errore: ' + e.message, '#ef4444'));
         document.getElementById('m-extract-update').onclick = () => runExtract({ mode: 'update' }).catch(e => showExtractStatus('Errore: ' + e.message, '#ef4444'));
 
-        // Toggle collapse, persisted. Default: chiuso.
+        // Toggle collapse, persisted. Default: chiuso. Migration: forza chiuso una sola volta
+        // su versioni precedenti per utenti che avevano salvato '0'.
         const EXTRACT_COLLAPSE_KEY = 'epicode_extract_collapsed';
+        const EXTRACT_COLLAPSE_MIGRATION = 'epicode_extract_collapse_force_v2';
+        if (!localStorage.getItem(EXTRACT_COLLAPSE_MIGRATION)) {
+            localStorage.setItem(EXTRACT_COLLAPSE_KEY, '1');
+            localStorage.setItem(EXTRACT_COLLAPSE_MIGRATION, '1');
+        }
         const stored = localStorage.getItem(EXTRACT_COLLAPSE_KEY);
         let extractCollapsed = stored === null ? true : stored === '1';
         const applyExtractCollapsed = () => {
@@ -1767,17 +2024,28 @@
     }
     buildExtractPanel();
 
-    // ---------- Version footer in box ----------
+    // ---------- Footer 5-col: Bug | Sostieni | Version ----------
     (function addVersionFooter() {
         const body = document.getElementById('m-body');
         if (!body || document.getElementById('m-version-footer')) return;
-        const v = document.createElement('div');
-        v.id = 'm-version-footer';
         let ver = '';
         try { ver = chrome.runtime.getManifest().version; } catch (_) {}
-        v.textContent = `EpiDuck v${ver}`;
-        v.style.cssText = 'text-align:right;font-size:9px;color:#3d2b6e;font-family:monospace;margin-top:6px;padding-top:4px;border-top:1px dashed #2a1054;';
+        const verShort = `v${(ver || '').split('.')[0] || ver}`;
+        const v = document.createElement('div');
+        v.id = 'm-version-footer';
+        v.style.cssText = 'display:grid;grid-template-columns:2fr 2fr 1fr;gap:4px;align-items:stretch;margin-top:6px;padding-top:4px;border-top:1px dashed #2a1054;font-family:monospace;';
+        v.innerHTML = `
+            <button id="m-bug" title="Segnala bug su GitHub" style="background:#0e2a18;color:#4ade80;border:1px solid #166534;padding:5px 4px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:10px;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🐛 Segnala bug</button>
+            <button id="m-support" title="Sostieni su Buy Me a Coffee" style="background:#FFDD00;color:#000;border:none;padding:5px 4px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:10px;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">☕ Sostieni</button>
+            <button id="m-version-link" title="Releases su GitHub" style="background:#2a1054;color:#a78bfa;border:none;padding:5px 4px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:10px;font-family:monospace;">${verShort}</button>
+        `;
         body.appendChild(v);
+        const bug = document.getElementById('m-bug');
+        if (bug) bug.onclick = openBugReport;
+        const sup = document.getElementById('m-support');
+        if (sup) sup.onclick = () => { try { window.open('https://buymeacoffee.com/79ai4gmnnt', '_blank'); } catch (_) {} };
+        const verBtn = document.getElementById('m-version-link');
+        if (verBtn) verBtn.onclick = () => { try { window.open('https://github.com/matteo-sketch/EpiDuck/releases', '_blank'); } catch (_) {} };
     })();
     } // end bootEpiDuck
 })();

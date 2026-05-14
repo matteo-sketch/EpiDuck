@@ -6,52 +6,65 @@
 
     let TARGET = 1.0;
     let active = false;
-    let overrideInstalled = false;
+    let preservesPitch = true; // mantieni tonalità (smoother audio)
     const TAG = '[EpicodeFlow/main]';
     const seen = new WeakSet();
-    const origRate = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
-    const origDefault = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'defaultPlaybackRate');
 
-    // Override solo dopo segnale enable dal content script (rispetta toggle popup)
-    function installOverride() {
-        if (overrideInstalled) return;
-        overrideInstalled = true;
-        Object.defineProperty(HTMLMediaElement.prototype, 'playbackRate', {
-            get: function () { return origRate.get.call(this); },
-            set: function (value) {
-                if (!active) { origRate.set.call(this, value); return; }
-                origRate.set.call(this, TARGET);
-            },
-            configurable: true
-        });
-        if (origDefault) {
-            Object.defineProperty(HTMLMediaElement.prototype, 'defaultPlaybackRate', {
-                get: function () { return origDefault.get.call(this); },
-                set: function (value) {
-                    if (!active) { origDefault.set.call(this, value); return; }
-                    origDefault.set.call(this, TARGET);
-                },
-                configurable: true
-            });
+    // --- Rate limiter (max 1000 set / 20s, ban dopo 3 violazioni) ---
+    const RATE_LIMIT_PERIOD = 20000;
+    const RATE_LIMIT = 1000;
+    const RATE_LIMIT_MAX_VIOLATIONS = 3;
+
+    function checkLimited(elem) {
+        if (!elem || elem._epDuckBanned) return true;
+        const now = Date.now();
+        const bucket = Math.floor(now / RATE_LIMIT_PERIOD);
+        const c = elem._epDuckRateCounter;
+        if (c && c.bucket === bucket) {
+            c.count++;
+            if (c.count > RATE_LIMIT) {
+                elem._epDuckViolations = (elem._epDuckViolations || 0) + 1;
+                if (elem._epDuckViolations >= RATE_LIMIT_MAX_VIOLATIONS) {
+                    elem._epDuckBanned = true;
+                    console.warn(TAG, 'elemento bannato per rate limit', elem);
+                }
+                elem._epDuckRateCounter = null;
+                return true;
+            }
+        } else {
+            elem._epDuckRateCounter = { bucket, count: 1 };
         }
-        // MutationObserver + scan iniziale
-        if (document.documentElement) mo.observe(document.documentElement, { childList: true, subtree: true });
-        scan(document);
-        document.addEventListener('DOMContentLoaded', () => scan(document), true);
-        setInterval(() => scan(document), 500);
+        return false;
     }
 
-    function force(v) {
-        try { origRate.set.call(v, TARGET); } catch (_) {}
+    // --- Set rate per-elemento (no prototype override, no-op check, preservesPitch) ---
+    function setRateSafe(elem, value) {
+        if (!elem) return;
+        if (checkLimited(elem)) return;
+        const v = Math.max(0.0625, Math.min(16, +value || 1));
+        try {
+            if (elem.playbackRate.toFixed(3) !== v.toFixed(3)) {
+                elem.playbackRate = v;
+            }
+        } catch (_) {}
+        try {
+            if (elem.defaultPlaybackRate.toFixed(3) !== v.toFixed(3)) {
+                elem.defaultPlaybackRate = v;
+            }
+        } catch (_) {}
+        try { elem.preservesPitch = preservesPitch; } catch (_) {}
+        try { elem.mozPreservesPitch = preservesPitch; } catch (_) {}
+        try { elem.webkitPreservesPitch = preservesPitch; } catch (_) {}
     }
 
     function attach(v) {
         if (seen.has(v)) return;
         seen.add(v);
-        if (active) force(v);
-        const reapply = () => { if (active) force(v); };
-        ['ratechange','play','playing','loadedmetadata','canplay','seeked','timeupdate']
-            .forEach(ev => v.addEventListener(ev, reapply, true));
+        if (active) setRateSafe(v, TARGET);
+        const reapply = () => { if (active) setRateSafe(v, TARGET); };
+        // Eventi RILEVANTI per perdita di playbackRate: niente timeupdate (troppo frequente)
+        ['ratechange', 'play', 'playing', 'loadedmetadata', 'canplay', 'seeked']
+            .forEach(ev => v.addEventListener(ev, reapply, { capture: true, passive: true }));
     }
 
     function scan(root) {
@@ -59,18 +72,28 @@
         root.querySelectorAll('video').forEach(attach);
     }
 
-    const mo = new MutationObserver(muts => {
+    const mo = new MutationObserver((muts) => {
         for (const m of muts) for (const n of m.addedNodes) {
             if (n.nodeType !== 1) continue;
             if (n.tagName === 'VIDEO') attach(n); else scan(n);
         }
     });
 
+    function startScanners() {
+        if (document.documentElement) mo.observe(document.documentElement, { childList: true, subtree: true });
+        scan(document);
+        document.addEventListener('DOMContentLoaded', () => scan(document), true);
+        // Polling raro: 1s invece di 500ms, e solo per cogliere player tardivi
+        setInterval(() => scan(document), 1000);
+    }
+
     document.addEventListener('__epicodeflow-enable', () => {
-        active = true;
-        installOverride();
+        if (!active) {
+            active = true;
+            startScanners();
+        }
         updateBanner();
-        document.querySelectorAll('video').forEach(force);
+        document.querySelectorAll('video').forEach(v => setRateSafe(v, TARGET));
     });
 
     document.addEventListener('__epicodeflow-disable', () => {
@@ -79,9 +102,14 @@
     });
 
     document.addEventListener('__epicodeflow-speed', (e) => {
-        TARGET = e.detail;
+        TARGET = +e.detail || 1;
         updateBanner();
-        if (active) document.querySelectorAll('video').forEach(force);
+        if (active) document.querySelectorAll('video').forEach(v => setRateSafe(v, TARGET));
+    });
+
+    document.addEventListener('__epicodeflow-pitch', (e) => {
+        preservesPitch = !!e.detail;
+        if (active) document.querySelectorAll('video').forEach(v => setRateSafe(v, TARGET));
     });
 
     let banner = null;
@@ -111,5 +139,5 @@
         banner = b;
     }
 
-    console.log(TAG, 'installato (dormant, in attesa di enable)');
+    console.log(TAG, 'installato (dormant, per-element setter + rate-limit)');
 })();
