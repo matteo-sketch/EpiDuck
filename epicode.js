@@ -280,12 +280,20 @@ ${errLines}
         return { server, own, effective: isFinite(effective) ? effective : null };
     }
 
-    // Cap velocità quando tracker server-side presente (altrimenti server non sta dietro)
-    const MAX_SPEED_TRACKED = 4;
-    const MAX_SPEED_TRACKED_STUCK = 1.5; // throttle estremo quando server stagna
-    const SERVER_STUCK_MS = 8000;
+    // ---------- Speed modes: adaptive vs forced ----------
+    const SPEED_MODE_KEY = `epicode_speed_mode_${location.hostname}`;
+    const ADAPTIVE_FLOOR = 2;
+    const ADAPTIVE_CEILING = 16;
+    const SERVER_STUCK_MS = 6000;       // > N sec senza progresso = stuck
+    const SERVER_SMOOTH_MS = 8000;      // > N sec di flusso buono = prova ramp-up
+    const ADAPTIVE_TICK_MS = 3000;      // valuta adaptive ogni N ms
+    const MAX_SPEED_TRACKED_STUCK = 1.5;
+
+    let speedMode = localStorage.getItem(SPEED_MODE_KEY) || 'adaptive'; // 'adaptive' | 'forced'
+    let adaptiveTarget = currentSpeed; // velocità corrente in adaptive (dinamica)
+    let lastAdaptiveCheckTs = 0;
     let lastEffectiveSpeed = null;
-    let pageEntryServerPct = null;   // % server al caricamento pagina (per evitare skip immediato)
+    let pageEntryServerPct = null;
     let pageLoadTs = Date.now();
     let serverWatchdog = { lastPct: -1, lastChangeTs: 0 };
 
@@ -314,13 +322,65 @@ ${errLines}
         return (Date.now() - serverWatchdog.lastChangeTs) > SERVER_STUCK_MS;
     }
 
+    function isServerSmooth() {
+        if (!isTrackedLesson()) return false;
+        if (serverWatchdog.lastChangeTs === 0) return false;
+        return (Date.now() - serverWatchdog.lastChangeTs) < SERVER_SMOOTH_MS;
+    }
+
     function isTrackedLesson() {
         return !!findEpicodeCompletionPctEl();
     }
 
+    function setSpeedMode(mode) {
+        if (mode !== 'adaptive' && mode !== 'forced') return;
+        speedMode = mode;
+        localStorage.setItem(SPEED_MODE_KEY, mode);
+        adaptiveTarget = currentSpeed; // reset target a quella scelta
+        lastEffectiveSpeed = null;
+        renderSpeedModeToggle();
+        renderSpeedButtons();
+        ensureEffectiveSpeed();
+    }
+
+    function tickAdaptiveSpeed() {
+        if (speedMode !== 'adaptive') return;
+        if (!isTrackedLesson()) return;
+        const now = Date.now();
+        if (now - lastAdaptiveCheckTs < ADAPTIVE_TICK_MS) return;
+        lastAdaptiveCheckTs = now;
+
+        const prev = adaptiveTarget;
+        if (isServerStuck()) {
+            // Halve target, floor 2x
+            adaptiveTarget = Math.max(ADAPTIVE_FLOOR, Math.floor(adaptiveTarget / 2));
+        } else if (isServerSmooth() && adaptiveTarget < currentSpeed) {
+            // Server tiene, ramp up verso il max scelto
+            const next = Math.min(currentSpeed, ADAPTIVE_CEILING, Math.ceil(adaptiveTarget * 1.5));
+            adaptiveTarget = next;
+        }
+        if (prev !== adaptiveTarget) {
+            lastEffectiveSpeed = null;
+            ensureEffectiveSpeed();
+        }
+    }
+
     function getEffectiveSpeed() {
-        // Niente cap automatico: utente sceglie liberamente.
-        // Throttle attivo SOLO se server stuck > 8s (watchdog emergenza).
+        // Forzata: rispetta sempre la scelta utente, niente throttle
+        if (speedMode === 'forced') return currentSpeed;
+        // Adattiva: usa adaptiveTarget (variabile) se tracker presente
+        if (isTrackedLesson()) {
+            // Fallback emergenza: se server stuck molto (>SERVER_STUCK_MS), forza floor
+            if (isServerStuck()) {
+                return Math.max(ADAPTIVE_FLOOR, Math.min(adaptiveTarget, currentSpeed));
+            }
+            return Math.min(adaptiveTarget, currentSpeed);
+        }
+        return currentSpeed;
+    }
+
+    // Wrapper legacy: alcune chiamate guardano se eravamo "stuck" (path non più usato direttamente)
+    function _getEffectiveSpeed_legacy() {
         if (isTrackedLesson() && isServerStuck()) {
             return Math.min(currentSpeed, MAX_SPEED_TRACKED_STUCK);
         }
@@ -566,22 +626,39 @@ ${errLines}
         try { iframe.contentWindow.postMessage({ __epicodeFlow: true, type: 'set-speed', speed }, '*'); } catch (_) {}
     }
 
+    function renderSpeedModeToggle() {
+        const el = document.getElementById('m-speed-mode');
+        if (!el) return;
+        const adaptive = speedMode === 'adaptive';
+        el.innerHTML = `
+            <button id="m-mode-adaptive" title="Adattiva: scala dinamicamente, min 2x, max scelto" style="flex:1;border:none;padding:3px;border-radius:3px;cursor:pointer;font-weight:bold;font-size:9px;background:${adaptive ? '#0891b2' : '#1e2a3f'};color:${adaptive ? 'white' : '#67e8f9'};">⚡ ADATTIVA</button>
+            <button id="m-mode-forced" title="Forzata: velocità fissa scelta da te" style="flex:1;border:none;padding:3px;border-radius:3px;cursor:pointer;font-weight:bold;font-size:9px;background:${!adaptive ? '#7c3aed' : '#2a1054'};color:${!adaptive ? 'white' : '#a78bfa'};">🔒 FORZATA</button>
+        `;
+        document.getElementById('m-mode-adaptive').onclick = () => setSpeedMode('adaptive');
+        document.getElementById('m-mode-forced').onclick = () => setSpeedMode('forced');
+    }
+
     function renderSpeedButtons() {
         const row = document.getElementById('m-speed-row');
         if (!row) return;
-        const throttling = typeof isServerStuck === 'function' && isServerStuck();
-        row.innerHTML = `<span style="font-size:10px;color:${throttling ? '#f59e0b' : '#a78bfa'};white-space:nowrap;" title="${throttling ? 'Server tracking fermo: throttle attivo' : 'Velocità riproduzione'}">${throttling ? 'Vel*:' : 'Vel:'}</span>`;
+        const adaptive = speedMode === 'adaptive';
+        const eff = getEffectiveSpeed();
+        const label = adaptive
+            ? (isTrackedLesson() ? `Max≤${currentSpeed}x (ora ${eff.toFixed(eff < 10 ? 2 : 0)}x)` : `Max ${currentSpeed}x`)
+            : `Fissa ${currentSpeed}x`;
+        row.innerHTML = `<span style="font-size:10px;color:#a78bfa;white-space:nowrap;flex-shrink:0;" title="${adaptive ? 'Adattiva: limite massimo. EpiDuck regola finché server regge.' : 'Forzata: velocità fissa.'}">${label}:</span>`;
         for (const s of SPEEDS) {
             const btn = document.createElement('button');
             btn.textContent = `${s}x`;
-            const active = s === currentSpeed;
+            const isMax = s === currentSpeed;
+            const isCurrentEff = adaptive && Math.abs(s - eff) < 0.01 && !isMax;
             btn.style.cssText = [
                 'flex:1', 'border:none', 'padding:4px 1px', 'border-radius:3px',
                 'cursor:pointer', 'font-weight:bold', 'font-size:10px',
-                `background:${active ? '#7c3aed' : '#2a1054'}`,
-                `color:${active ? 'white' : '#a78bfa'}`
+                `background:${isMax ? '#7c3aed' : (isCurrentEff ? '#0e7490' : '#2a1054')}`,
+                `color:${isMax || isCurrentEff ? 'white' : '#a78bfa'}`
             ].join(';');
-            btn.title = `Imposta velocità ${s}x`;
+            btn.title = adaptive ? `Imposta max ${s}x` : `Imposta velocità ${s}x`;
             btn.onclick = () => setSpeed(s);
             row.appendChild(btn);
         }
@@ -591,6 +668,8 @@ ${errLines}
         currentSpeed = speed;
         localStorage.setItem(SPEED_KEY, String(speed));
         localStorage.setItem('epicode_speed', String(speed));
+        // In adattiva: nuovo max → reset target a max (ripartiamo ottimisti)
+        if (speedMode === 'adaptive') adaptiveTarget = speed;
         renderSpeedButtons();
         lastEffectiveSpeed = null;
         ensureEffectiveSpeed();
@@ -766,7 +845,8 @@ ${errLines}
         'padding:14px', 'border:2px solid #6d28d9',
         'font-family:sans-serif', 'font-weight:bold',
         'border-radius:10px', 'box-shadow:0 4px 24px rgba(109,40,217,0.5)',
-        'min-width:230px', 'font-size:12px'
+        'width:260px', 'box-sizing:border-box', 'font-size:12px',
+        'max-height:90vh', 'overflow-y:auto'
     ].join(';');
 
     const DUCK_SVG_INLINE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="22" height="22"><rect width="128" height="128" rx="22" fill="#0EA5E9"/><ellipse cx="60" cy="92" rx="40" ry="26" fill="#FDE047"/><path d="M 28 88 Q 36 68 56 72 Q 60 86 44 96 Z" fill="#FACC15"/><circle cx="86" cy="54" r="24" fill="#FDE047"/><circle cx="93" cy="48" r="4.5" fill="#1F2937"/><circle cx="94.5" cy="46.5" r="1.5" fill="#FFFFFF"/><path d="M 106 54 L 122 58 L 122 64 L 106 60 Z" fill="#F97316"/><path d="M 106 60 L 122 64 L 122 68 L 106 66 Z" fill="#EA580C"/><ellipse cx="68" cy="118" rx="6" ry="3" fill="#F97316"/><ellipse cx="84" cy="118" rx="6" ry="3" fill="#F97316"/></svg>';
@@ -781,6 +861,7 @@ ${errLines}
         <div id="m-body">
             <div id="m-timer"  style="font-size:11px;color:#6b57a0;margin-bottom:3px;">Sessione: 0m / ${MAX_MINUTES}m</div>
             <div id="m-vinfo"  style="font-size:10px;color:#6b57a0;margin-bottom:4px;">speed ⏳ | ${currentQuality} ⏳</div>
+            <div id="m-speed-mode" style="display:flex;gap:3px;margin-bottom:4px;"></div>
             <div id="m-speed-row" style="display:flex;gap:3px;margin-bottom:4px;align-items:center;"></div>
             <div id="m-quality-row" style="display:flex;gap:3px;margin-bottom:6px;align-items:center;"></div>
             <div id="m-vid-time"   style="font-size:11px;color:#ede9fe;margin-bottom:2px;">Video: --:-- / --:--</div>
@@ -875,6 +956,7 @@ ${errLines}
     document.getElementById('m-settings').onclick = () => {
         try { window.open(chrome.runtime.getURL('popup.html'), '_blank'); } catch (e) { console.warn('openSettings', e); }
     };
+    renderSpeedModeToggle();
     renderSpeedButtons();
     renderQualityButtons();
 
@@ -900,8 +982,10 @@ ${errLines}
             if (status) status.style.display = 'none';
             if (settings) settings.style.display = 'none';
             if (header) header.style.cursor = 'pointer';
-            box.style.minWidth = '0';
+            box.style.width = '150px';
             box.style.padding = '6px 10px';
+            box.style.maxHeight = 'unset';
+            box.style.overflowY = 'visible';
         } else {
             body.style.display = 'block';
             btn.textContent    = '▾ CHIUDI';
@@ -914,8 +998,10 @@ ${errLines}
             if (status) status.style.display = 'block';
             if (settings) settings.style.display = 'inline-block';
             if (header) header.style.cursor = 'move';
-            box.style.minWidth = '230px';
+            box.style.width = '260px';
             box.style.padding = '14px';
+            box.style.maxHeight = '90vh';
+            box.style.overflowY = 'auto';
         }
     }
 
@@ -1363,6 +1449,7 @@ ${errLines}
         const meetVid = findMeetingVideo();
         if (meetVid) handleMeetingVideo(meetVid);
         tickServerWatchdog();
+        tickAdaptiveSpeed();
         tickEpicodeCompletion();
         const tracked = isTrackedLesson();
         if (tracked !== lastTrackedState) {
