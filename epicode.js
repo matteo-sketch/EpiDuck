@@ -37,8 +37,9 @@
     const QUALITY_KEY = `epicode_quality_${location.hostname}`;
     const SPEED_KEY   = `epicode_speed_${location.hostname}`;
 
-    let currentSpeed   = parseFloat(localStorage.getItem(SPEED_KEY) || localStorage.getItem('epicode_speed') || '1');
-    let currentQuality = localStorage.getItem(QUALITY_KEY) || '360p';
+    // Default ottimizzato per studio rapido: 16x + 240p (utente può cambiare e viene memorizzato)
+    let currentSpeed   = parseFloat(localStorage.getItem(SPEED_KEY) || localStorage.getItem('epicode_speed') || '16');
+    let currentQuality = localStorage.getItem(QUALITY_KEY) || '240p';
 
     const startTime = Date.now();
     let scriptActive   = true;
@@ -429,7 +430,7 @@ ${errLines}
 
     // Trova content-next-button con fallback (testid → aria-label → text match)
     function findContentNextButton() {
-        let btn = findContentNextButton();
+        let btn = document.querySelector('[data-testid="content-next-button"]');
         if (btn) return btn;
         const buttons = [...document.querySelectorAll('button, [role="button"]')];
         btn = buttons.find(b => {
@@ -884,19 +885,34 @@ ${errLines}
         const btn  = document.getElementById('m-toggle');
         const status = document.getElementById('m-status');
         const settings = document.getElementById('m-settings');
+        const header = document.getElementById('m-header');
         if (!body || !btn) return;
         if (boxCollapsed) {
             body.style.display = 'none';
-            btn.textContent    = '▸';
+            btn.textContent    = '▸ APRI';
+            btn.style.background = '#7c3aed';
+            btn.style.color = 'white';
+            btn.style.padding = '3px 8px';
+            btn.style.borderRadius = '4px';
+            btn.style.fontSize = '11px';
+            btn.title = 'Apri pannello EpiDuck';
             if (status) status.style.display = 'none';
             if (settings) settings.style.display = 'none';
+            if (header) header.style.cursor = 'pointer';
             box.style.minWidth = '0';
             box.style.padding = '6px 10px';
         } else {
             body.style.display = 'block';
-            btn.textContent    = '▾';
+            btn.textContent    = '▾ CHIUDI';
+            btn.style.background = '#2a1054';
+            btn.style.color = '#a78bfa';
+            btn.style.padding = '3px 8px';
+            btn.style.borderRadius = '4px';
+            btn.style.fontSize = '10px';
+            btn.title = 'Minimizza pannello';
             if (status) status.style.display = 'block';
             if (settings) settings.style.display = 'inline-block';
+            if (header) header.style.cursor = 'move';
             box.style.minWidth = '230px';
             box.style.padding = '14px';
         }
@@ -1981,8 +1997,14 @@ ${errLines}
         document.getElementById('m-extract-new').onclick = () => runExtract({ mode: 'new' }).catch(e => showExtractStatus('Errore: ' + e.message, '#ef4444'));
         document.getElementById('m-extract-update').onclick = () => runExtract({ mode: 'update' }).catch(e => showExtractStatus('Errore: ' + e.message, '#ef4444'));
 
-        // Toggle collapse, persisted. Default: chiuso.
+        // Toggle collapse, persisted. Default: chiuso. Migration: forza chiuso una sola volta
+        // su versioni precedenti per utenti che avevano salvato '0'.
         const EXTRACT_COLLAPSE_KEY = 'epicode_extract_collapsed';
+        const EXTRACT_COLLAPSE_MIGRATION = 'epicode_extract_collapse_force_v2';
+        if (!localStorage.getItem(EXTRACT_COLLAPSE_MIGRATION)) {
+            localStorage.setItem(EXTRACT_COLLAPSE_KEY, '1');
+            localStorage.setItem(EXTRACT_COLLAPSE_MIGRATION, '1');
+        }
         const stored = localStorage.getItem(EXTRACT_COLLAPSE_KEY);
         let extractCollapsed = stored === null ? true : stored === '1';
         const applyExtractCollapsed = () => {
@@ -2001,7 +2023,7 @@ ${errLines}
     }
     buildExtractPanel();
 
-    // ---------- Version footer + Bug report in box ----------
+    // ---------- Version footer + Bug + Sostieni in box ----------
     (function addVersionFooter() {
         const body = document.getElementById('m-body');
         if (!body || document.getElementById('m-version-footer')) return;
@@ -2009,14 +2031,19 @@ ${errLines}
         v.id = 'm-version-footer';
         let ver = '';
         try { ver = chrome.runtime.getManifest().version; } catch (_) {}
-        v.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-top:6px;padding-top:4px;border-top:1px dashed #2a1054;font-family:monospace;';
+        v.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:6px;padding-top:4px;border-top:1px dashed #2a1054;font-family:monospace;';
         v.innerHTML = `
-            <button id="m-bug" title="Segnala bug" style="background:none;border:none;color:#ef4444;font-size:11px;cursor:pointer;padding:0;font-family:monospace;">🐛 Segnala bug</button>
-            <span style="font-size:9px;color:#3d2b6e;">EpiDuck v${ver}</span>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:4px;">
+                <button id="m-bug" title="Segnala bug su GitHub" style="background:none;border:none;color:#ef4444;font-size:11px;cursor:pointer;padding:0;font-family:monospace;">🐛 Bug</button>
+                <button id="m-support" title="Offrimi un caffè ☕" style="flex:1;background:#FFDD00;color:#000;border:none;padding:5px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:11px;">☕ Sostieni</button>
+            </div>
+            <span style="font-size:9px;color:#3d2b6e;text-align:right;">EpiDuck v${ver}</span>
         `;
         body.appendChild(v);
         const bug = document.getElementById('m-bug');
         if (bug) bug.onclick = openBugReport;
+        const sup = document.getElementById('m-support');
+        if (sup) sup.onclick = () => { try { window.open('https://buymeacoffee.com/79ai4gmnnt', '_blank'); } catch (_) {} };
     })();
     } // end bootEpiDuck
 })();
