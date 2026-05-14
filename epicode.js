@@ -319,9 +319,12 @@ ${errLines}
     }
 
     function getEffectiveSpeed() {
-        if (!isTrackedLesson()) return currentSpeed;
-        const cap = isServerStuck() ? MAX_SPEED_TRACKED_STUCK : MAX_SPEED_TRACKED;
-        return Math.min(currentSpeed, cap);
+        // Niente cap automatico: utente sceglie liberamente.
+        // Throttle attivo SOLO se server stuck > 8s (watchdog emergenza).
+        if (isTrackedLesson() && isServerStuck()) {
+            return Math.min(currentSpeed, MAX_SPEED_TRACKED_STUCK);
+        }
+        return currentSpeed;
     }
 
     function ensureEffectiveSpeed() {
@@ -566,21 +569,19 @@ ${errLines}
     function renderSpeedButtons() {
         const row = document.getElementById('m-speed-row');
         if (!row) return;
-        const capped = typeof isTrackedLesson === 'function' && isTrackedLesson();
-        row.innerHTML = `<span style="font-size:10px;color:${capped ? '#f59e0b' : '#a78bfa'};white-space:nowrap;" title="${capped ? 'Tracking server attivo: cap a 4x' : 'Velocità'}">${capped ? 'Vel*:' : 'Vel:'}</span>`;
+        const throttling = typeof isServerStuck === 'function' && isServerStuck();
+        row.innerHTML = `<span style="font-size:10px;color:${throttling ? '#f59e0b' : '#a78bfa'};white-space:nowrap;" title="${throttling ? 'Server tracking fermo: throttle attivo' : 'Velocità riproduzione'}">${throttling ? 'Vel*:' : 'Vel:'}</span>`;
         for (const s of SPEEDS) {
             const btn = document.createElement('button');
             btn.textContent = `${s}x`;
             const active = s === currentSpeed;
-            const willCap = capped && s > MAX_SPEED_TRACKED;
             btn.style.cssText = [
                 'flex:1', 'border:none', 'padding:4px 1px', 'border-radius:3px',
                 'cursor:pointer', 'font-weight:bold', 'font-size:10px',
                 `background:${active ? '#7c3aed' : '#2a1054'}`,
-                `color:${active ? 'white' : (willCap ? '#6b7280' : '#a78bfa')}`,
-                willCap ? 'text-decoration:line-through' : ''
-            ].filter(Boolean).join(';');
-            btn.title = willCap ? 'Velocità limitata a 4x (tracking server)' : '';
+                `color:${active ? 'white' : '#a78bfa'}`
+            ].join(';');
+            btn.title = `Imposta velocità ${s}x`;
             btn.onclick = () => setSpeed(s);
             row.appendChild(btn);
         }
@@ -2023,27 +2024,28 @@ ${errLines}
     }
     buildExtractPanel();
 
-    // ---------- Version footer + Bug + Sostieni in box ----------
+    // ---------- Footer 5-col: Bug | Sostieni | Version ----------
     (function addVersionFooter() {
         const body = document.getElementById('m-body');
         if (!body || document.getElementById('m-version-footer')) return;
-        const v = document.createElement('div');
-        v.id = 'm-version-footer';
         let ver = '';
         try { ver = chrome.runtime.getManifest().version; } catch (_) {}
-        v.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:6px;padding-top:4px;border-top:1px dashed #2a1054;font-family:monospace;';
+        const verShort = `v${(ver || '').split('.')[0] || ver}`;
+        const v = document.createElement('div');
+        v.id = 'm-version-footer';
+        v.style.cssText = 'display:grid;grid-template-columns:2fr 2fr 1fr;gap:4px;align-items:stretch;margin-top:6px;padding-top:4px;border-top:1px dashed #2a1054;font-family:monospace;';
         v.innerHTML = `
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:4px;">
-                <button id="m-bug" title="Segnala bug su GitHub" style="background:none;border:none;color:#ef4444;font-size:11px;cursor:pointer;padding:0;font-family:monospace;">🐛 Bug</button>
-                <button id="m-support" title="Offrimi un caffè ☕" style="flex:1;background:#FFDD00;color:#000;border:none;padding:5px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:11px;">☕ Sostieni</button>
-            </div>
-            <span style="font-size:9px;color:#3d2b6e;text-align:right;">EpiDuck v${ver}</span>
+            <button id="m-bug" title="Segnala bug su GitHub" style="background:#0e2a18;color:#4ade80;border:1px solid #166534;padding:5px 4px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:10px;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🐛 Segnala bug</button>
+            <button id="m-support" title="Sostieni su Buy Me a Coffee" style="background:#FFDD00;color:#000;border:none;padding:5px 4px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:10px;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">☕ Sostieni</button>
+            <button id="m-version-link" title="Releases su GitHub" style="background:#2a1054;color:#a78bfa;border:none;padding:5px 4px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:10px;font-family:monospace;">${verShort}</button>
         `;
         body.appendChild(v);
         const bug = document.getElementById('m-bug');
         if (bug) bug.onclick = openBugReport;
         const sup = document.getElementById('m-support');
         if (sup) sup.onclick = () => { try { window.open('https://buymeacoffee.com/79ai4gmnnt', '_blank'); } catch (_) {} };
+        const verBtn = document.getElementById('m-version-link');
+        if (verBtn) verBtn.onclick = () => { try { window.open('https://github.com/matteo-sketch/EpiDuck/releases', '_blank'); } catch (_) {} };
     })();
     } // end bootEpiDuck
 })();
