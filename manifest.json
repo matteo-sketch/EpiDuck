@@ -11,13 +11,16 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_icon": "icon-toolbar.svg"
+    "default_icon": {
+      "16": "icon-16.png",
+      "48": "icon-48.png",
+      "128": "icon-128.png"
+    }
   },
   "icons": {
-    "16": "icon-toolbar.svg",
-    "32": "icon-toolbar.svg",
-    "48": "icon-toolbar.svg",
-    "128": "icon.svg"
+    "16": "icon-16.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
   },
   "content_scripts": [
     {
@@ -46,7 +49,7 @@
       "matches": ["*://player.vimeo.com/*"]
     },
     {
-      "resources": ["popup.html", "popup.js", "icon.svg", "icon-toolbar.svg"],
+      "resources": ["popup.html", "popup.js", "icon.svg", "icon-toolbar.svg", "icon-16.png", "icon-48.png", "icon-128.png"],
       "matches": ["*://*.epicode.edu.mt/*"]
     }
   ]
