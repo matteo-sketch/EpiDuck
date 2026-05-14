@@ -2035,8 +2035,8 @@ ${errLines}
         v.id = 'm-version-footer';
         v.style.cssText = 'display:grid;grid-template-columns:2fr 2fr 1fr;gap:4px;align-items:stretch;margin-top:6px;padding-top:4px;border-top:1px dashed #2a1054;font-family:monospace;';
         v.innerHTML = `
-            <button id="m-bug" title="Segnala bug su GitHub" style="background:#0e2a18;color:#4ade80;border:1px solid #166534;padding:5px 4px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:10px;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🐛 Segnala bug</button>
-            <button id="m-support" title="Sostieni su Buy Me a Coffee" style="background:#FFDD00;color:#000;border:none;padding:5px 4px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:10px;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">☕ Sostieni</button>
+            <button id="m-bug" title="Segnala bug su GitHub" style="background:#0e2a18;color:#4ade80;border:1px solid #166534;padding:4px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:10px;font-family:monospace;white-space:nowrap;overflow:hidden;display:inline-flex;align-items:center;justify-content:center;gap:4px;"><span style="font-size:14px;line-height:1;">🐛</span><span>Segnala bug</span></button>
+            <button id="m-support" title="Sostieni su Buy Me a Coffee" style="background:#FFDD00;color:#000;border:none;padding:4px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:10px;font-family:monospace;white-space:nowrap;overflow:hidden;display:inline-flex;align-items:center;justify-content:center;gap:4px;"><span style="font-size:18px;line-height:1;">☕</span><span>Sostieni</span></button>
             <button id="m-version-link" title="Releases su GitHub" style="background:#2a1054;color:#a78bfa;border:none;padding:5px 4px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:10px;font-family:monospace;">${verShort}</button>
         `;
         body.appendChild(v);
