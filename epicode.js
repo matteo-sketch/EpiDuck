@@ -57,6 +57,7 @@
         lastUpdate: 0
     };
     let autoSkipArmed = true;
+    let userPaused    = false; // utente ha messo pausa manuale → no auto-play
 
     let measuredRate    = 0;
     let lastWallTs      = 0;
@@ -68,23 +69,39 @@
 
     // ---------- Auto error capture + bug report ----------
     const ERROR_BUFFER_KEY = 'epicode_error_buffer';
+    const ERROR_BUFFER_VERSION_KEY = 'epicode_error_buffer_version';
     const MAX_ERRORS = 50;
     const REPO_ISSUES_URL = 'https://github.com/matteo-sketch/EpiDuck/issues/new';
+    const CURRENT_VERSION = (() => { try { return chrome.runtime.getManifest().version; } catch (_) { return ''; } })();
+
+    // Pulizia buffer cross-version: se cambia versione, errori vecchi non valgono più
+    try {
+        chrome.storage.local.get([ERROR_BUFFER_VERSION_KEY], (r) => {
+            if (r[ERROR_BUFFER_VERSION_KEY] !== CURRENT_VERSION) {
+                chrome.storage.local.set({
+                    [ERROR_BUFFER_KEY]: [],
+                    [ERROR_BUFFER_VERSION_KEY]: CURRENT_VERSION
+                });
+            }
+        });
+    } catch (_) {}
 
     function bufferError(payload) {
         try {
             chrome.storage.local.get([ERROR_BUFFER_KEY], (r) => {
                 const buf = (r[ERROR_BUFFER_KEY] || []);
-                buf.push({ ts: Date.now(), ...payload });
+                buf.push({ ts: Date.now(), v: CURRENT_VERSION, ...payload });
                 while (buf.length > MAX_ERRORS) buf.shift();
                 chrome.storage.local.set({ [ERROR_BUFFER_KEY]: buf });
             });
         } catch (_) {}
     }
 
-    function isOwnError(filename, msg) {
-        const s = `${filename || ''} ${msg || ''}`;
-        return /epicduck|epiduck|epicode\.js|vimeo\.js|vimeo-main\.js|EpicodeFlow/i.test(s);
+    function isOwnError(filename, msgOrStack) {
+        const ref = `${filename || ''} ${msgOrStack || ''}`;
+        // Solo errori provenienti da file dell'extension (chrome-extension://) E nostri moduli
+        if (!/chrome-extension:\/\//.test(ref)) return false;
+        return /epicode\.js|vimeo\.js|vimeo-main\.js|EpicodeFlow/i.test(ref);
     }
 
     window.addEventListener('error', (e) => {
@@ -218,6 +235,44 @@ ${errLines}
         }
     });
 
+    // ---------- Keyboard shortcuts ----------
+    // Cmd/Ctrl+Shift+S = skip lezione | P = play/pause | +/- = ciclo velocità
+    document.addEventListener('keydown', (e) => {
+        if (!scriptActive) return;
+        if (isTypingTarget(e.target)) return;
+        if (e.repeat) return;
+
+        // Cmd/Ctrl+Shift+S → skip
+        if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'S' || e.key === 's')) {
+            e.preventDefault();
+            if (typeof manualSkip === 'function') manualSkip();
+            return;
+        }
+        // Senza modificatori
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        const k = e.key;
+
+        if ((k === 'p' || k === 'P') && !e.shiftKey) {
+            e.preventDefault();
+            if (typeof togglePlayPause === 'function') togglePlayPause();
+            return;
+        }
+        if (k === '+' || k === '=') {
+            e.preventDefault();
+            const idx = SPEEDS.indexOf(currentSpeed);
+            const next = idx >= 0 ? SPEEDS[Math.min(SPEEDS.length - 1, idx + 1)] : SPEEDS[SPEEDS.length - 1];
+            if (next !== currentSpeed && typeof setSpeed === 'function') setSpeed(next);
+            return;
+        }
+        if (k === '-' || k === '_') {
+            e.preventDefault();
+            const idx = SPEEDS.indexOf(currentSpeed);
+            const next = idx > 0 ? SPEEDS[idx - 1] : SPEEDS[0];
+            if (next !== currentSpeed && typeof setSpeed === 'function') setSpeed(next);
+            return;
+        }
+    }, true);
+
     // ---------- Widget completamento Epicode (in alto a destra) ----------
     // Cache: l'elemento è lo stesso fra tick, validare prima di ri-cercare nel DOM
     let _cachedPctEl = null;
@@ -296,6 +351,17 @@ ${errLines}
     let pageEntryServerPct = null;
     let pageLoadTs = Date.now();
     let serverWatchdog = { lastPct: -1, lastChangeTs: 0 };
+
+    // Timer pendenti su nuova lezione → da cancellare al cambio iframe per evitare race
+    let _pageEntryTimers = [];
+    function clearPageEntryTimers() {
+        for (const id of _pageEntryTimers) { try { clearTimeout(id); } catch (_) {} }
+        _pageEntryTimers = [];
+    }
+
+    // Retry cap forzaNavigazione (evita loop eterno fine corso)
+    const MAX_NAV_RETRY = 10;
+    let _navRetryCount = 0;
 
     function tickServerWatchdog() {
         if (!isTrackedLesson()) {
@@ -454,6 +520,22 @@ ${errLines}
             return;
         }
 
+        // FALLBACK: server stuck oltre HARD_STUCK_MS + own >= OWN_FALLBACK_THRESHOLD → skip forzato
+        const SERVER_HARD_STUCK_MS = 120000; // 2min
+        const OWN_FALLBACK_THRESHOLD = 95;
+        if (own != null && own >= OWN_FALLBACK_THRESHOLD &&
+            serverWatchdog.lastChangeTs > 0 &&
+            (Date.now() - serverWatchdog.lastChangeTs) > SERVER_HARD_STUCK_MS) {
+            autoSkipArmed = false;
+            markVideoCompleted();
+            const skipEl = document.getElementById('m-vid-skip');
+            if (skipEl) { skipEl.innerText = `Skip: fallback own ${own.toFixed(0)}% (srv stuck ${Math.floor((Date.now()-serverWatchdog.lastChangeTs)/1000)}s) → vado`; skipEl.style.color = '#2ecc71'; }
+            const status = document.getElementById('m-status');
+            if (status) { status.innerText = `Server bloccato — fallback own ${own.toFixed(0)}% → skip`; status.style.color = '#4ade80'; }
+            setTimeout(forzaNavigazione, 300);
+            return;
+        }
+
         // Server indietro: se own ha già superato server di molto, mostra stato attesa
         if (own != null && own - server > 15) {
             const status = document.getElementById('m-status');
@@ -529,14 +611,35 @@ ${errLines}
             meetingLastLessonId = lessonId;
             meetingAutoPlayed = false;
             autoSkipArmed = true;
+            userPaused = false;
+            pageLoadTs = Date.now();
+            pageEntryServerPct = null;
+            serverWatchdog = { lastPct: -1, lastChangeTs: 0 };
+            _navRetryCount = 0;
             ensureMeetingDetail();
         }
         // Forza playback rate
         try { v.playbackRate = currentSpeed; } catch (_) {}
         // Auto-play (utente potrebbe aver disabilitato autoplay con suono)
-        if (autoMode && scriptActive && v.paused && !meetingAutoPlayed) {
+        // Strategia: prova prima unmuted; se autoplay policy blocca, retry con muted + unmute post-play
+        if (autoMode && scriptActive && !userPaused && v.paused && !meetingAutoPlayed) {
             meetingAutoPlayed = true;
-            try { v.muted = true; v.play().catch(() => {}); } catch (_) {}
+            const tryPlay = (muteFirst) => {
+                if (muteFirst) { try { v.muted = true; } catch (_) {} }
+                let p;
+                try { p = v.play(); } catch (_) { return; }
+                if (p && typeof p.catch === 'function') {
+                    p.then(() => {
+                        if (muteFirst) {
+                            // Unmute dopo che autoplay riesce — utente vuole audio
+                            setTimeout(() => { try { v.muted = false; } catch (_) {} }, 400);
+                        }
+                    }).catch(() => {
+                        if (!muteFirst) tryPlay(true);
+                    });
+                }
+            };
+            tryPlay(false);
             const btn = document.querySelector('.vjs-big-play-button');
             if (btn && v.paused) try { btn.click(); } catch (_) {}
         }
@@ -899,6 +1002,38 @@ ${errLines}
     `;
     document.body.appendChild(box);
 
+    // ---------- Light mode CSS (prefers-color-scheme) ----------
+    if (!document.getElementById('m-light-style')) {
+        const lightStyle = document.createElement('style');
+        lightStyle.id = 'm-light-style';
+        lightStyle.textContent = `
+        @media (prefers-color-scheme: light) {
+            #m-box-main {
+                background: #faf9ff !important;
+                color: #1e1b3a !important;
+                border-color: #7c3aed !important;
+                box-shadow: 0 4px 24px rgba(124,58,237,0.25) !important;
+            }
+            #m-box-main #m-status { color: #6d28d9 !important; }
+            #m-box-main #m-timer,
+            #m-box-main #m-vinfo,
+            #m-box-main #m-vid-skip:not([style*="color:#"]),
+            #m-box-main #m-transcript-count,
+            #m-box-main #m-save-status { color: #6b57a0 !important; }
+            #m-box-main #m-vid-time,
+            #m-box-main #m-vid-remain { color: #1e1b3a !important; }
+            #m-box-main #m-debug { color: #9b87d6 !important; }
+            #m-box-main #m-settings { color: #0891b2 !important; }
+            #m-box-main #m-toggle { color: #7c3aed !important; }
+            #m-box-main button#m-playpause { background: #ede9fe !important; color: #2a1054 !important; }
+            #m-box-main button#m-save-file { background: #dbeafe !important; color: #1e3a5f !important; }
+            #m-box-main button#m-save-notion { background: #ede9fe !important; color: #3b1f6e !important; }
+            #m-box-main button#m-copy-transcript { background: #d1fae5 !important; color: #065f46 !important; border-color: #10b981 !important; }
+        }
+        `;
+        document.head.appendChild(lightStyle);
+    }
+
     // ---------- Drag-to-move ----------
     (function makeDraggable() {
         const header = document.getElementById('m-header');
@@ -1025,13 +1160,13 @@ ${errLines}
         if (!iframe) return;
         const btn = document.getElementById('m-playpause');
         if (videoState.paused) {
+            userPaused = false;
             vimeoCmd(iframe, 'play');
-            btn.innerText = '⏸ PAUSA VIDEO';
-            btn.style.background = '#2a1054';
+            if (btn) { btn.innerText = '⏸ PAUSA VIDEO'; btn.style.background = '#2a1054'; }
         } else {
+            userPaused = true;
             vimeoCmd(iframe, 'pause');
-            btn.innerText = '▶ RIPRENDI';
-            btn.style.background = '#f97316';
+            if (btn) { btn.innerText = '▶ RIPRENDI'; btn.style.background = '#f97316'; }
         }
     }
 
@@ -1211,6 +1346,7 @@ ${errLines}
     ensureCurriculum();
 
     function renderCompletedDots() {
+        if (!scriptActive) return;
         let completed = [];
         let started = [];
         try { completed = JSON.parse(localStorage.getItem('epicode_completed_videos') || '[]'); } catch(e){}
@@ -1354,13 +1490,20 @@ ${errLines}
             return;
         }
 
-        // 3. Nessuna opzione → re-arm e retry dopo 3s (PATCH)
+        // 3. Nessuna opzione → re-arm e retry dopo 3s (con cap)
         const nodes = getSidebarNodes();
         const lessonId = getLessonId();
+        _navRetryCount++;
+        if (_navRetryCount > MAX_NAV_RETRY) {
+            if (status) { status.innerText = `NAV: max retry (${MAX_NAV_RETRY}) raggiunti, mi fermo`; status.style.color = '#ef4444'; }
+            _navRetryCount = 0;
+            return;
+        }
         if (status) {
-            if (nodes.length === 0)   status.innerText = 'NAV: sidebar non trovata (retry 3s)';
-            else if (!lessonId)       status.innerText = 'NAV: ID non in URL (retry 3s)';
-            else                      status.innerText = 'NAV: nessun next (retry 3s)';
+            const tag = `[${_navRetryCount}/${MAX_NAV_RETRY}]`;
+            if (nodes.length === 0)   status.innerText = `NAV ${tag}: sidebar non trovata (retry 3s)`;
+            else if (!lessonId)       status.innerText = `NAV ${tag}: ID non in URL (retry 3s)`;
+            else                      status.innerText = `NAV ${tag}: nessun next (retry 3s)`;
         }
         autoSkipArmed = true;
         setTimeout(() => { if (scriptActive && autoMode) forzaNavigazione(); }, 3000);
@@ -1444,6 +1587,7 @@ ${errLines}
 
     let lastTrackedState = null;
     function updateVideoUI() {
+        if (!scriptActive) return;
         tickNoVideoCountdown();
         tickVideoEnd();
         const meetVid = findMeetingVideo();
@@ -1551,6 +1695,7 @@ ${errLines}
                 lastIframeSrc  = iframe.src;
                 qualityApplied = false;
                 autoSkipArmed  = true;
+                userPaused     = false;
                 forcedSkipDeadline = 0;
                 videoState.duration = 0;
                 videoState.currentTime = 0;
@@ -1567,28 +1712,30 @@ ${errLines}
                 pageLoadTs = Date.now();
                 serverWatchdog = { lastPct: -1, lastChangeTs: 0 };
                 autoQualityActive = false;
+                _navRetryCount = 0;
+                clearPageEntryTimers();
                 invalidatePctElCache();
-                setTimeout(checkAutoQualityDrop, 1500);
+                _pageEntryTimers.push(setTimeout(checkAutoQualityDrop, 1500));
                 ensureCurriculum();
                 meetingDetailCache = { lessonId: null, detail: null, inflight: null };
                 ensureMeetingDetail();
                 // Cattura % server iniziale dopo qualche secondo (page deve renderizzarlo)
-                setTimeout(() => {
+                _pageEntryTimers.push(setTimeout(() => {
                     const p = readEpicodeCompletionPct();
                     if (p != null && pageEntryServerPct == null) pageEntryServerPct = p;
-                }, 2500);
-                setTimeout(() => {
+                }, 2500));
+                _pageEntryTimers.push(setTimeout(() => {
                     const p = readEpicodeCompletionPct();
                     if (p != null && pageEntryServerPct == null) pageEntryServerPct = p;
-                }, 5000);
+                }, 5000));
                 // Speed effective applicato in tickEpicodeCompletion (rileva tracker post-load)
-                setTimeout(ensureEffectiveSpeed, 1500);
+                _pageEntryTimers.push(setTimeout(ensureEffectiveSpeed, 1500));
             }
 
             // Near-end skip gestito in tickVideoEnd() ogni 500ms (reazione veloce).
 
             status.innerText = autoMode ? 'VIDEO RILEVATO' : 'VIDEO (AUTO OFF)';
-            if (autoMode && videoState.paused !== false) vimeoCmd(iframe, 'play');
+            if (autoMode && !userPaused && videoState.paused !== false) vimeoCmd(iframe, 'play');
             applyQuality(iframe);
             updateVinfo();
             updateVideoUI();
