@@ -59,6 +59,94 @@
     let autoSkipArmed = true;
     let userPaused    = false; // utente ha messo pausa manuale → no auto-play
 
+    // ---------- StayAwake (Screen Wake Lock API) ----------
+    const STAYAWAKE_KEY = 'epicode_stayawake';
+    let stayawakeEnabled = localStorage.getItem(STAYAWAKE_KEY) !== '0'; // default ON
+    let _wakeLockSentinel = null;
+    let _wakeLockDesired = false;
+
+    async function acquireWakeLock() {
+        if (_wakeLockSentinel) return true;
+        if (!('wakeLock' in navigator)) return false;
+        try {
+            _wakeLockSentinel = await navigator.wakeLock.request('screen');
+            _wakeLockSentinel.addEventListener('release', () => { _wakeLockSentinel = null; renderStayawakeIndicator(); });
+            renderStayawakeIndicator();
+            return true;
+        } catch (_) {
+            _wakeLockSentinel = null;
+            return false;
+        }
+    }
+
+    function releaseWakeLock() {
+        if (!_wakeLockSentinel) return;
+        try { _wakeLockSentinel.release(); } catch (_) {}
+        _wakeLockSentinel = null;
+        renderStayawakeIndicator();
+    }
+
+    function stayawakeShouldBeActive() {
+        if (!stayawakeEnabled || !scriptActive) return false;
+        if (isExtracting) return true;
+        // Video Vimeo in riproduzione (auto on, fresh data, not paused)
+        const fresh = videoState.lastUpdate > 0 && (Date.now() - videoState.lastUpdate) < 6000;
+        if (autoMode && fresh && !videoState.paused && !videoState.ended) return true;
+        // Meeting Video.js in riproduzione
+        const v = (typeof findMeetingVideo === 'function') ? findMeetingVideo() : null;
+        if (autoMode && v && !v.paused && !v.ended) return true;
+        return false;
+    }
+
+    function tickStayawake() {
+        const want = stayawakeShouldBeActive();
+        _wakeLockDesired = want;
+        if (want && !_wakeLockSentinel) acquireWakeLock();
+        else if (!want && _wakeLockSentinel) releaseWakeLock();
+    }
+
+    // Wake lock auto-released quando document hidden → re-acquire al visible
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && _wakeLockDesired && !_wakeLockSentinel) {
+            acquireWakeLock();
+        }
+    });
+
+    function setStayawakeEnabled(on) {
+        stayawakeEnabled = !!on;
+        localStorage.setItem(STAYAWAKE_KEY, on ? '1' : '0');
+        renderStayawakeIndicator();
+        tickStayawake();
+    }
+
+    function renderStayawakeIndicator() {
+        const el = document.getElementById('m-stayawake');
+        if (!el) return;
+        const active = !!_wakeLockSentinel;
+        const supported = 'wakeLock' in navigator;
+        if (!supported) {
+            el.textContent = '☾⃠';
+            el.title = 'StayAwake non supportato dal browser';
+            el.style.color = '#6b57a0';
+            return;
+        }
+        if (!stayawakeEnabled) {
+            el.textContent = '☾';
+            el.title = 'StayAwake OFF (click per abilitare)';
+            el.style.color = '#6b57a0';
+            return;
+        }
+        if (active) {
+            el.textContent = '☀';
+            el.title = 'StayAwake attivo — PC non andrà in standby';
+            el.style.color = '#fde047';
+            return;
+        }
+        el.textContent = '☾';
+        el.title = 'StayAwake abilitato (idle, attivo solo durante riproduzione/estrazione)';
+        el.style.color = '#a78bfa';
+    }
+
     let measuredRate    = 0;
     let lastWallTs      = 0;
     let lastVideoTs     = 0;
@@ -958,6 +1046,7 @@ ${errLines}
             <span id="m-duck" style="flex-shrink:0;display:inline-flex;align-items:center;">${DUCK_SVG_INLINE}</span>
             <span id="m-state-icon" style="font-size:14px;flex-shrink:0;">⏳</span>
             <div id="m-status" style="color:#a78bfa;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;">ANALISI...</div>
+            <button id="m-stayawake" title="StayAwake" style="background:none;border:none;cursor:pointer;color:#a78bfa;font-size:14px;padding:0 2px;line-height:1;flex-shrink:0;">☾</button>
             <button id="m-settings" title="Impostazioni" style="background:none;border:none;cursor:pointer;color:#67e8f9;font-size:14px;padding:0 4px;line-height:1;flex-shrink:0;">⚙</button>
             <button id="m-toggle" title="Minimizza/espandi" style="background:none;border:none;cursor:pointer;color:#7c3aed;font-size:17px;font-weight:bold;padding:0 0 0 4px;line-height:1;flex-shrink:0;">▾</button>
         </div>
@@ -1025,6 +1114,7 @@ ${errLines}
             #m-box-main #m-debug { color: #9b87d6 !important; }
             #m-box-main #m-settings { color: #0891b2 !important; }
             #m-box-main #m-toggle { color: #7c3aed !important; }
+            #m-box-main #m-stayawake { color: #6d28d9 !important; }
             #m-box-main button#m-playpause { background: #ede9fe !important; color: #2a1054 !important; }
             #m-box-main button#m-save-file { background: #dbeafe !important; color: #1e3a5f !important; }
             #m-box-main button#m-save-notion { background: #ede9fe !important; color: #3b1f6e !important; }
@@ -1091,6 +1181,11 @@ ${errLines}
     document.getElementById('m-settings').onclick = () => {
         try { window.open(chrome.runtime.getURL('popup.html'), '_blank'); } catch (e) { console.warn('openSettings', e); }
     };
+    document.getElementById('m-stayawake').onclick = () => {
+        if (!('wakeLock' in navigator)) return;
+        setStayawakeEnabled(!stayawakeEnabled);
+    };
+    renderStayawakeIndicator();
     renderSpeedModeToggle();
     renderSpeedButtons();
     renderQualityButtons();
@@ -1103,6 +1198,7 @@ ${errLines}
         const btn  = document.getElementById('m-toggle');
         const status = document.getElementById('m-status');
         const settings = document.getElementById('m-settings');
+        const stayawake = document.getElementById('m-stayawake');
         const header = document.getElementById('m-header');
         if (!body || !btn) return;
         if (boxCollapsed) {
@@ -1116,6 +1212,7 @@ ${errLines}
             btn.title = 'Apri pannello EpiDuck';
             if (status) status.style.display = 'none';
             if (settings) settings.style.display = 'none';
+            if (stayawake) stayawake.style.display = 'inline-block'; // visibile anche collapsed (utile vedere stato)
             if (header) header.style.cursor = 'pointer';
             box.style.width = '150px';
             box.style.padding = '6px 10px';
@@ -1132,6 +1229,7 @@ ${errLines}
             btn.title = 'Minimizza pannello';
             if (status) status.style.display = 'block';
             if (settings) settings.style.display = 'inline-block';
+            if (stayawake) stayawake.style.display = 'inline-block';
             if (header) header.style.cursor = 'move';
             box.style.width = '260px';
             box.style.padding = '14px';
@@ -1587,7 +1685,8 @@ ${errLines}
 
     let lastTrackedState = null;
     function updateVideoUI() {
-        if (!scriptActive) return;
+        if (!scriptActive) { releaseWakeLock(); return; }
+        tickStayawake();
         tickNoVideoCountdown();
         tickVideoEnd();
         const meetVid = findMeetingVideo();
@@ -2108,11 +2207,13 @@ ${errLines}
     async function runExtract({ mode }) {
         isExtracting = true;
         updateStateIcon();
+        tickStayawake();
         try {
             return await runExtractInner({ mode });
         } finally {
             isExtracting = false;
             updateStateIcon();
+            tickStayawake();
         }
     }
 
