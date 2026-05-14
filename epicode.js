@@ -547,9 +547,12 @@ ${errLines}
         notionSettings.pageId = result.notionPageId || '';
     });
 
-    chrome.storage.onChanged.addListener((changes) => {
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== 'local') return;
         if (changes.notionApiKey) notionSettings.apiKey = changes.notionApiKey.newValue || '';
         if (changes.notionPageId) notionSettings.pageId = changes.notionPageId.newValue || '';
+        // Cross-tab sync: anthropicApiKey usato in runExtract via extractGetSettings (read on demand)
+        // extractionState scritto da una tab visibile alle altre alla prossima azione
     });
 
     // ---------- Controllo velocità ----------
@@ -1019,7 +1022,14 @@ ${errLines}
 
     // ---------- API curriculum (cms.epicode.com) ----------
     const LEAF_TYPES = new Set(['embed','meeting','article','markdown','project','openEnded','quiz','nps','course_nps','activity']);
+    const CURRICULUM_TTL_MS = 10 * 60 * 1000; // 10 min
     let curriculumCache = { courseId: null, ordered: [], fetchedAt: 0, inflight: null };
+
+    function curriculumCacheFresh() {
+        return curriculumCache.ordered.length > 0
+            && curriculumCache.fetchedAt > 0
+            && (Date.now() - curriculumCache.fetchedAt) < CURRICULUM_TTL_MS;
+    }
 
     async function fetchCurriculum(courseId) {
         const tok = localStorage.getItem('auth_token');
@@ -1048,19 +1058,25 @@ ${errLines}
     async function ensureCurriculum() {
         const courseId = getCourseId();
         if (!courseId) return [];
-        if (curriculumCache.courseId === courseId && curriculumCache.ordered.length > 0) return curriculumCache.ordered;
+        if (curriculumCache.courseId === courseId && curriculumCacheFresh()) return curriculumCache.ordered;
         if (curriculumCache.inflight && curriculumCache.courseId === courseId) return curriculumCache.inflight;
+        // Cache scaduta o nuovo corso: invalida e re-fetcha
+        if (curriculumCache.courseId !== courseId) {
+            curriculumCache.ordered = [];
+            curriculumCache.fetchedAt = 0;
+        }
         curriculumCache.courseId = courseId;
         curriculumCache.inflight = (async () => {
             try {
                 const ordered = await fetchCurriculum(courseId);
                 curriculumCache.ordered = ordered;
                 curriculumCache.fetchedAt = Date.now();
-                console.log('[EpicodeFlow] curriculum cache popolata', { courseId, items: ordered.length });
+                console.log('[EpicodeFlow] curriculum cache popolata', { courseId, items: ordered.length, ttlMin: CURRICULUM_TTL_MS / 60000 });
                 return ordered;
             } catch (e) {
                 console.error('[EpicodeFlow] fetchCurriculum errore', e);
                 curriculumCache.ordered = [];
+                curriculumCache.fetchedAt = 0;
                 return [];
             } finally {
                 curriculumCache.inflight = null;
