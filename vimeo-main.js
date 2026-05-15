@@ -79,12 +79,13 @@
         }
     });
 
+    let _scanIntervalId = null;
     function startScanners() {
         if (document.documentElement) mo.observe(document.documentElement, { childList: true, subtree: true });
         scan(document);
         document.addEventListener('DOMContentLoaded', () => scan(document), true);
         // Polling raro: 1s invece di 500ms, e solo per cogliere player tardivi
-        setInterval(() => scan(document), 1000);
+        if (!_scanIntervalId) _scanIntervalId = setInterval(() => scan(document), 1000);
     }
 
     document.addEventListener('__epicodeflow-enable', () => {
@@ -99,6 +100,8 @@
     document.addEventListener('__epicodeflow-disable', () => {
         active = false;
         if (banner) banner.style.display = 'none';
+        if (_scanIntervalId) { clearInterval(_scanIntervalId); _scanIntervalId = null; }
+        try { mo.disconnect(); } catch (_) {}
     });
 
     document.addEventListener('__epicodeflow-speed', (e) => {

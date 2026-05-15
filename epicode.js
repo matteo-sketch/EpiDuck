@@ -174,11 +174,31 @@
         });
     } catch (_) {}
 
+    // Fetch helper con timeout (AbortController) — default 30s
+    function _fetchWithTimeout(url, opts = {}, timeoutMs = 30000) {
+        const controller = new AbortController();
+        const id = setTimeout(() => { try { controller.abort(); } catch (_) {} }, timeoutMs);
+        const finalOpts = { ...opts };
+        if (!finalOpts.signal) finalOpts.signal = controller.signal;
+        return fetch(url, finalOpts).finally(() => clearTimeout(id));
+    }
+
+    function _anonymizeRef(s) {
+        if (!s) return s;
+        // Strip query string + path tail per URL non extension (privacy):
+        // - chrome-extension://abc/epicode.js:123 → preservato
+        // - https://learn.epicode.edu.mt/course/330/curriculum/12345?token=abc → https://learn.epicode.edu.mt/...
+        return String(s).replace(/(https?:\/\/[^/\s]+)\/[^\s)]*/g, '$1/...');
+    }
+
     function bufferError(payload) {
         try {
+            const sanitized = { ...payload };
+            if (sanitized.stack) sanitized.stack = _anonymizeRef(sanitized.stack);
+            if (sanitized.file)  sanitized.file  = _anonymizeRef(sanitized.file);
             chrome.storage.local.get([ERROR_BUFFER_KEY], (r) => {
                 const buf = (r[ERROR_BUFFER_KEY] || []);
-                buf.push({ ts: Date.now(), v: CURRENT_VERSION, ...payload });
+                buf.push({ ts: Date.now(), v: CURRENT_VERSION, ...sanitized });
                 while (buf.length > MAX_ERRORS) buf.shift();
                 chrome.storage.local.set({ [ERROR_BUFFER_KEY]: buf });
             });
@@ -1041,7 +1061,7 @@ ${errLines}
         const blocks = buildNotionBlocks();
 
         try {
-            const res = await fetch('https://api.notion.com/v1/pages', {
+            const res = await _fetchWithTimeout('https://api.notion.com/v1/pages', {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${notionSettings.apiKey}`,
@@ -1174,14 +1194,36 @@ ${errLines}
         header.style.cursor = 'move';
         let dragging = false, offX = 0, offY = 0, moved = false;
         const POS_KEY = `epicode_box_pos_${location.hostname}`;
+        const MIN_VISIBLE_X = 80; // pixel minimi visibili da bordo dx
+        const MIN_VISIBLE_Y = 30; // pixel minimi visibili da bordo bottom
+
+        function clampPos(left, top) {
+            return {
+                left: Math.max(0, Math.min(window.innerWidth  - MIN_VISIBLE_X, left)),
+                top:  Math.max(0, Math.min(window.innerHeight - MIN_VISIBLE_Y, top))
+            };
+        }
+
         try {
             const saved = JSON.parse(localStorage.getItem(POS_KEY) || 'null');
             if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
-                box.style.left = Math.max(0, Math.min(window.innerWidth - 80, saved.left)) + 'px';
-                box.style.top  = Math.max(0, Math.min(window.innerHeight - 30, saved.top))  + 'px';
+                const c = clampPos(saved.left, saved.top);
+                box.style.left = c.left + 'px';
+                box.style.top  = c.top + 'px';
                 box.style.right = 'auto';
             }
         } catch (e) {}
+
+        // Re-clamp on window resize (utente potrebbe ridurre finestra dopo drag)
+        window.addEventListener('resize', () => {
+            if (!box.style.left || box.style.left === 'auto') return;
+            const rect = box.getBoundingClientRect();
+            const c = clampPos(rect.left, rect.top);
+            box.style.left = c.left + 'px';
+            box.style.top  = c.top + 'px';
+            try { localStorage.setItem(POS_KEY, JSON.stringify(c)); } catch (_) {}
+        });
+
         header.addEventListener('mousedown', (e) => {
             if (e.target.closest('button')) return;
             const rect = box.getBoundingClientRect();
@@ -1197,10 +1239,9 @@ ${errLines}
         document.addEventListener('mousemove', (e) => {
             if (!dragging) return;
             moved = true;
-            const x = Math.max(0, Math.min(window.innerWidth  - 40, e.clientX - offX));
-            const y = Math.max(0, Math.min(window.innerHeight - 30, e.clientY - offY));
-            box.style.left = x + 'px';
-            box.style.top  = y + 'px';
+            const c = clampPos(e.clientX - offX, e.clientY - offY);
+            box.style.left = c.left + 'px';
+            box.style.top  = c.top + 'px';
         });
         document.addEventListener('mouseup', () => {
             if (!dragging) return;
@@ -1414,7 +1455,7 @@ ${errLines}
         const tok = localStorage.getItem('auth_token');
         if (!tok) throw new Error('no auth_token');
         const url = `https://cms.epicode.com/items/content?filter%5Bcourses%5D%5Bcourse%5D%5B_eq%5D=${courseId}&fields=id,parent,sort,type,title&limit=-1`;
-        const r = await fetch(url, { credentials: 'include', headers: { Authorization: `Bearer ${tok}` } });
+        const r = await _fetchWithTimeout(url, { credentials: 'include', headers: { Authorization: `Bearer ${tok}` } });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = await r.json();
         const all = j.data || [];
@@ -1520,6 +1561,8 @@ ${errLines}
 
     // ---------- Listener da iframe Vimeo ----------
     window.addEventListener('message', (e) => {
+        // Solo iframe Vimeo player può mandarci messaggi __epicodeFlow
+        if (e.origin !== 'https://player.vimeo.com') return;
         const d = e.data;
         if (!d || typeof d !== 'object' || !d.__epicodeFlow) return;
 
@@ -1968,7 +2011,7 @@ ${errLines}
 
     async function fetchContentDetail(id) {
         const tok = localStorage.getItem('auth_token');
-        const r = await fetch(`https://cms.epicode.com/items/content/${id}?fields=id,title,type,parent,sort,is_translated,summary,markdown,body,url,video_duration,embed_type`, {
+        const r = await _fetchWithTimeout(`https://cms.epicode.com/items/content/${id}?fields=id,title,type,parent,sort,is_translated,summary,markdown,body,url,video_duration,embed_type`, {
             credentials: 'include',
             headers: { Authorization: `Bearer ${tok}` }
         });
@@ -2021,12 +2064,13 @@ ${errLines}
         return out;
     }
 
+    // Restituisce { ok, text, error } — caller può decidere se fallback al testo originale
     async function aiRework(text, lang, anthropicKey, model = 'claude-sonnet-4-6') {
-        if (!anthropicKey || !text) return text;
+        if (!anthropicKey || !text) return { ok: true, text, error: null };
         const langName = lang === 'it' ? 'italiano' : 'english';
         const prompt = `Riassumi e riorganizza i seguenti appunti di lezione universitaria in ${langName}, mantenendo la struttura markdown (titoli, elenchi, code blocks). Sii esaustivo ma compatto. Mantieni i termini tecnici originali. Restituisci solo il markdown.\n\n---\n\n${text}`;
         try {
-            const r = await fetch('https://api.anthropic.com/v1/messages', {
+            const r = await _fetchWithTimeout('https://api.anthropic.com/v1/messages', {
                 method: 'POST',
                 headers: {
                     'x-api-key': anthropicKey,
@@ -2035,11 +2079,22 @@ ${errLines}
                     'anthropic-dangerous-direct-browser-access': 'true'
                 },
                 body: JSON.stringify({ model, max_tokens: 4000, messages: [{ role: 'user', content: prompt }] })
-            });
-            if (!r.ok) { console.warn('[EpicodeFlow] AI HTTP', r.status); return text; }
+            }, 60000);
+            if (!r.ok) {
+                const err = await r.json().catch(() => ({}));
+                const msg = `HTTP ${r.status} ${err.error?.message || err.message || ''}`.trim();
+                console.warn('[EpicodeFlow] AI', msg);
+                return { ok: false, text, error: msg };
+            }
             const j = await r.json();
-            return j.content?.[0]?.text || text;
-        } catch (e) { console.warn('[EpicodeFlow] AI err', e); return text; }
+            const out = j.content?.[0]?.text;
+            if (!out) return { ok: false, text, error: 'risposta vuota' };
+            return { ok: true, text: out, error: null };
+        } catch (e) {
+            const msg = e.name === 'AbortError' ? 'timeout (60s)' : (e.message || String(e));
+            console.warn('[EpicodeFlow] AI err', msg);
+            return { ok: false, text, error: msg };
+        }
     }
 
     function langsArrayFromOpt(opt) {
@@ -2090,8 +2145,19 @@ ${errLines}
     }
 
     // ---------- Notion ----------
-    async function notionFetch(path, opts = {}, notionKey) {
-        const r = await fetch(`https://api.notion.com/v1${path}`, {
+    // Throttle: Notion API limita ~3 req/sec. Tieni delay 350ms tra calls + retry su 429.
+    const NOTION_MIN_DELAY_MS = 350;
+    const NOTION_MAX_CHILDREN_PER_REQ = 100; // limite hard Notion API
+    let _notionLastReqTs = 0;
+
+    async function notionFetch(path, opts = {}, notionKey, _retryCount = 0) {
+        // Throttle pre-call
+        const now = Date.now();
+        const wait = _notionLastReqTs + NOTION_MIN_DELAY_MS - now;
+        if (wait > 0) await new Promise(res => setTimeout(res, wait));
+        _notionLastReqTs = Date.now();
+
+        const r = await _fetchWithTimeout(`https://api.notion.com/v1${path}`, {
             ...opts,
             headers: {
                 'Authorization': `Bearer ${notionKey}`,
@@ -2100,9 +2166,31 @@ ${errLines}
                 ...(opts.headers || {})
             }
         });
+
+        // Retry su 429 (rate limit) e 5xx transient — max 3 tentativi con backoff esponenziale
+        if ((r.status === 429 || r.status >= 500) && _retryCount < 3) {
+            const retryAfterHeader = r.headers.get('Retry-After');
+            const retryAfterMs = retryAfterHeader
+                ? Math.min(30000, parseFloat(retryAfterHeader) * 1000)
+                : Math.min(8000, 500 * Math.pow(2, _retryCount));
+            await new Promise(res => setTimeout(res, retryAfterMs));
+            return notionFetch(path, opts, notionKey, _retryCount + 1);
+        }
+
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(`Notion ${path}: ${j.message || r.status}`);
         return j;
+    }
+
+    // Append children chunked per rispetto limite 100 blocchi/request
+    async function notionAppendChildrenChunked(blockId, children, notionKey) {
+        for (let i = 0; i < children.length; i += NOTION_MAX_CHILDREN_PER_REQ) {
+            const chunk = children.slice(i, i + NOTION_MAX_CHILDREN_PER_REQ);
+            await notionFetch(`/blocks/${blockId}/children`, {
+                method: 'PATCH',
+                body: JSON.stringify({ children: chunk })
+            }, notionKey);
+        }
     }
 
     function paragraphBlock(content) {
@@ -2148,13 +2236,13 @@ ${errLines}
         }, notionKey);
         const rootId = root.id;
 
-        // Per ogni item ordinato, appendi blocks con batching
+        // Per ogni item ordinato, appendi blocks con batching (chunked auto a 100/req)
         const lessonPageMap = {};
         let batch = [];
         let count = 0;
         const flush = async () => {
             if (batch.length === 0) return;
-            await notionFetch(`/blocks/${rootId}/children`, { method: 'PATCH', body: JSON.stringify({ children: batch }) }, notionKey);
+            await notionAppendChildrenChunked(rootId, batch, notionKey);
             batch = [];
         };
         for (const item of ordered) {
@@ -2186,7 +2274,7 @@ ${errLines}
         let batch = [];
         const flush = async () => {
             if (batch.length === 0) return;
-            await notionFetch(`/blocks/${rootPageId}/children`, { method: 'PATCH', body: JSON.stringify({ children: batch }) }, notionKey);
+            await notionAppendChildrenChunked(rootPageId, batch, notionKey);
             batch = [];
         };
         let count = 0;
@@ -2214,12 +2302,13 @@ ${errLines}
         let courseTitle = `Corso ${courseId}`;
         try {
             const tok = localStorage.getItem('auth_token');
-            const r = await fetch(`https://cms.epicode.com/items/courses/${courseId}?fields=id,title`, { headers: { Authorization: `Bearer ${tok}` } });
+            const r = await _fetchWithTimeout(`https://cms.epicode.com/items/courses/${courseId}?fields=id,title`, { headers: { Authorization: `Bearer ${tok}` } });
             const j = await r.json();
             if (j.data?.title) courseTitle = j.data.title;
         } catch (_) {}
 
         const textByLang = {};
+        const aiErrors = []; // accumula errori aiRework per surfacing finale
         const leafTypes = new Set(['embed', 'markdown', 'article', 'meeting', 'quiz', 'project', 'openEnded', 'nps', 'course_nps']);
         const leaves = ordered.filter(o => leafTypes.has(o.type));
         let i = 0;
@@ -2235,7 +2324,13 @@ ${errLines}
                 }
                 if (aiRewrite && anthropicKey) {
                     for (const lang of langs) {
-                        if (t[lang]) t[lang] = await aiRework(t[lang], lang, anthropicKey);
+                        if (t[lang]) {
+                            const res = await aiRework(t[lang], lang, anthropicKey);
+                            t[lang] = res.text; // su errore mantiene originale
+                            if (!res.ok) {
+                                aiErrors.push(`${item.title || item.id}/${lang}: ${res.error}`);
+                            }
+                        }
                     }
                 }
                 textByLang[item.id] = t;
@@ -2243,7 +2338,7 @@ ${errLines}
                 console.warn('[EpicodeFlow] fetch detail err', item.id, e.message);
             }
         }
-        return { courseId, courseTitle, ordered, textByLang };
+        return { courseId, courseTitle, ordered, textByLang, aiErrors };
     }
 
     function showExtractStatus(msg, color) {
@@ -2343,6 +2438,13 @@ ${errLines}
         courseState.lastRun = Date.now();
         settings.state[dataset.courseId] = courseState;
         await extractSaveState(settings.state);
+
+        // Surface errori aiRework (se ce ne sono): testo originale già salvato come fallback
+        if (dataset.aiErrors && dataset.aiErrors.length > 0) {
+            const sample = dataset.aiErrors.slice(0, 3).join(' | ');
+            const more = dataset.aiErrors.length > 3 ? ` +${dataset.aiErrors.length - 3}` : '';
+            showExtractStatus(`⚠ AI rework fallito su ${dataset.aiErrors.length} lezione/i (testo originale salvato): ${sample}${more}`, '#f59e0b');
+        }
     }
 
     // ---------- UI modal ----------

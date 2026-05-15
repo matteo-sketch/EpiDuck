@@ -39,12 +39,18 @@
 
     let video = null;
     let attached = false;
+    const SEEN_CUES_CAP = 10000; // ~3h lezione a 1 cue/sec
     const seenCues = new Set();
     let transcriptBtnClicked = false;
 
     function sendCue(cue, lang) {
         const key = `${cue.startTime}|${cue.text}`;
         if (seenCues.has(key)) return;
+        // Cap memoria: rimuovi entry più vecchia (FIFO via iteration order Set)
+        if (seenCues.size >= SEEN_CUES_CAP) {
+            const first = seenCues.values().next().value;
+            if (first !== undefined) seenCues.delete(first);
+        }
         seenCues.add(key);
         const text = cue.text.replace(/<[^>]+>/g, '').trim();
         if (!text) return;
@@ -149,7 +155,7 @@
             playbackRate: video.playbackRate
         };
         if (extra) Object.assign(msg, extra);
-        try { window.parent.postMessage(msg, '*'); } catch (_) {}
+        try { window.parent.postMessage(msg, 'https://learn.epicode.edu.mt'); } catch (_) {}
     }
 
     function attach(v) {
@@ -186,7 +192,7 @@
         }
     });
 
-    setInterval(() => {
+    let _vimeoPollId = setInterval(() => {
         // Re-emit enable in case main-world script loaded after the initial dispatch
         try { document.dispatchEvent(new CustomEvent('__epicodeflow-enable')); } catch (_) {}
         const v = findVideo(document);
@@ -196,6 +202,12 @@
         enforceTrackModes();
         if (!transcriptBtnClicked) clickVimeoTranscriptButton();
     }, 800);
+
+    // Cleanup su toggle off / disable event
+    document.addEventListener('__epicodeflow-disable', () => {
+        if (_vimeoPollId) { clearInterval(_vimeoPollId); _vimeoPollId = null; }
+        seenCues.clear();
+    }, { once: false });
 
     } // end bootVimeoScript
 })();

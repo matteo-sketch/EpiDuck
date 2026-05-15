@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "EpiDuck",
-  "version": "64.2",
+  "version": "64.3",
   "description": "Auto-play, velocità configurabile, qualità per dominio, auto-skip, transcript, Estrai Corso → MD/Notion/AI.",
   "permissions": ["storage"],
   "host_permissions": [
     "https://api.notion.com/*",
     "https://api.anthropic.com/*",
-    "https://cms.epicode.com/*"
+    "https://cms.epicode.com/items/*",
+    "https://cms.epicode.com/v2/*"
   ],
   "action": {
     "default_popup": "popup.html",
