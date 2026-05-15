@@ -88,6 +88,7 @@
 
     function stayawakeShouldBeActive() {
         if (!stayawakeEnabled || !scriptActive) return false;
+        if (courseFinished) return false; // fine corso → PC libero
         if (isExtracting) return true;
         // Video Vimeo in riproduzione (auto on, fresh data, not paused)
         const fresh = videoState.lastUpdate > 0 && (Date.now() - videoState.lastUpdate) < 6000;
@@ -1539,6 +1540,64 @@ ${errLines}
         return null;
     }
 
+    // ---------- End-of-course detection ----------
+    // True se lezione corrente è l'ultima leaf del curriculum (no next leaf dopo).
+    // Richiede cache curriculum caricato (altrimenti ritorna false per non bloccare prematuramente).
+    function isCourseLastLeaf() {
+        const lessonId = parseInt(getLessonId() || '', 10);
+        if (!lessonId) return false;
+        const ordered = curriculumCache.ordered;
+        if (!ordered || ordered.length < 2) return false;
+        const idx = ordered.findIndex(o => o.id === lessonId);
+        if (idx === -1) return false;
+        for (let i = idx + 1; i < ordered.length; i++) {
+            if (LEAF_TYPES.has(ordered[i].type)) return false;
+        }
+        return true;
+    }
+
+    let courseFinished = false;
+    let _courseFinishedFor = null; // courseId per cui è stato marcato (reset su cambio corso)
+
+    function markCourseFinished() {
+        const cid = getCourseId();
+        if (courseFinished && _courseFinishedFor === cid) return;
+        courseFinished = true;
+        _courseFinishedFor = cid;
+        autoMode = false;
+        autoSkipArmed = false;
+        noVideoDeadline = 0;
+        _navRetryCount = 0;
+        // UI: aggiorna button auto + status
+        const btnAuto = document.getElementById('m-auto');
+        if (btnAuto) { btnAuto.innerText = '▶ RIPRENDI AUTO'; btnAuto.style.background = '#7f1d1d'; }
+        const status = document.getElementById('m-status');
+        if (status) { status.innerText = '🎉 Corso completato — auto OFF, PC libero'; status.style.color = '#4ade80'; }
+        const skipEl = document.getElementById('m-vid-skip');
+        if (skipEl) { skipEl.innerText = 'Skip: fine corso'; skipEl.style.color = '#4ade80'; }
+        // Passive mode + rilascio wake lock (PC libero di andare in standby)
+        sendPassiveToIframe(true);
+        try { tickStayawake(); } catch (_) {}
+    }
+
+    function tickCourseEnd() {
+        if (!curriculumCache.ordered || curriculumCache.ordered.length === 0) return;
+        const isLast = isCourseLastLeaf();
+        // Reset se utente è tornato a lezione precedente (non più last leaf)
+        if (!isLast && courseFinished) {
+            courseFinished = false;
+            _courseFinishedFor = null;
+            return;
+        }
+        if (!isLast || courseFinished) return;
+        // Ultima lezione: aspetta che sia ragionevolmente completata prima di marcare fine
+        const { server, own } = getCurrentCompletionPct();
+        const eff = Math.max(server ?? 0, own ?? 0);
+        if (eff >= 90 || videoState.ended) {
+            markCourseFinished();
+        }
+    }
+
     function getNextLessonUrl() {
         const next = getNextLessonFromCache();
         const courseId = getCourseId();
@@ -1647,6 +1706,11 @@ ${errLines}
 
     function forzaNavigazione() {
         if (!scriptActive) return;
+        // 🎉 Fine corso: nessun next leaf → no nav, marca completato
+        if (isCourseLastLeaf()) {
+            markCourseFinished();
+            return;
+        }
         const status = document.getElementById('m-status');
 
         // 0. API CMS: precomputed next lesson URL (preferred path)
@@ -1794,6 +1858,7 @@ ${errLines}
     let lastTrackedState = null;
     function updateVideoUI() {
         if (!scriptActive) { releaseWakeLock(); return; }
+        tickCourseEnd();
         tickStayawake();
         tickNoVideoCountdown();
         tickVideoEnd();
@@ -1947,7 +2012,7 @@ ${errLines}
 
             // Near-end skip gestito in tickVideoEnd() ogni 500ms (reazione veloce).
 
-            status.innerText = autoMode ? 'VIDEO RILEVATO' : 'VIDEO (AUTO OFF)';
+            if (!courseFinished) status.innerText = autoMode ? 'VIDEO RILEVATO' : 'VIDEO (AUTO OFF)';
             if (autoMode && !userPaused && videoState.paused !== false) vimeoCmd(iframe, 'play');
             applyQuality(iframe);
             updateVinfo();
@@ -1958,7 +2023,7 @@ ${errLines}
 
             if (autoMode && fresh && !videoState.paused && realTime >= 0 && Math.abs(realTime - lastProgress) < 0.05) {
                 stasiCount++;
-                status.innerText = `VIDEO FERMO (${stasiCount}/15)`;
+                if (!courseFinished) status.innerText = `VIDEO FERMO (${stasiCount}/15)`;
                 if (stasiCount >= 15) {
                     stasiCount = 0;
                     forzaNavigazione();
@@ -1966,9 +2031,11 @@ ${errLines}
             } else {
                 stasiCount   = 0;
                 lastProgress = realTime;
-                status.innerText = videoState.duration > 0
-                    ? `IN RIPRODUZIONE: ${fmt(videoState.currentTime)} / ${fmt(videoState.duration)}`
-                    : 'IN RIPRODUZIONE...';
+                if (!courseFinished) {
+                    status.innerText = videoState.duration > 0
+                        ? `IN RIPRODUZIONE: ${fmt(videoState.currentTime)} / ${fmt(videoState.duration)}`
+                        : 'IN RIPRODUZIONE...';
+                }
             }
 
         } else {
@@ -1982,10 +2049,18 @@ ${errLines}
                 updateVideoUI();
                 ensureCurriculum();
                 const apiHasNext = !!getNextLessonFromCache();
-                if (!apiHasNext) {
-                    status.innerText = 'NON VIDEO — fine sezione';
-                    status.style.color = '#f59e0b';
+                if (courseFinished) {
+                    // Status già scritto da markCourseFinished — non sovrascrivere
                     noVideoDeadline = 0;
+                } else if (!apiHasNext) {
+                    // Ultima leaf → marca fine corso (cache curriculum carica)
+                    if (isCourseLastLeaf()) {
+                        markCourseFinished();
+                    } else {
+                        status.innerText = 'NON VIDEO — fine sezione';
+                        status.style.color = '#f59e0b';
+                        noVideoDeadline = 0;
+                    }
                 } else if (!autoMode) {
                     status.innerText = 'NON VIDEO — AUTO OFF, premi SKIP';
                     status.style.color = '#f59e0b';
