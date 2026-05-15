@@ -562,9 +562,10 @@ ${errLines}
         lastAdaptiveCheckTs = now;
 
         const prev = adaptiveTarget;
+        // Floor effettivo: mai sopra la scelta utente (issue #3 — utente picks 1.25 non deve diventare 2)
+        const floor = Math.min(ADAPTIVE_FLOOR, currentSpeed);
         if (isServerStuck()) {
-            // Halve target, floor 2x
-            adaptiveTarget = Math.max(ADAPTIVE_FLOOR, Math.floor(adaptiveTarget / 2));
+            adaptiveTarget = Math.max(floor, Math.floor(adaptiveTarget / 2));
         } else if (isServerSmooth() && adaptiveTarget < currentSpeed) {
             // Server tiene, ramp up verso il max scelto
             const next = Math.min(currentSpeed, ADAPTIVE_CEILING, Math.ceil(adaptiveTarget * 1.5));
@@ -581,9 +582,10 @@ ${errLines}
         if (speedMode === 'forced') return currentSpeed;
         // Adattiva: usa adaptiveTarget (variabile) se tracker presente
         if (isTrackedLesson()) {
-            // Fallback emergenza: se server stuck molto (>SERVER_STUCK_MS), forza floor
+            // Floor effettivo capato a scelta utente (mai sopra currentSpeed)
+            const floor = Math.min(ADAPTIVE_FLOOR, currentSpeed);
             if (isServerStuck()) {
-                return Math.max(ADAPTIVE_FLOOR, Math.min(adaptiveTarget, currentSpeed));
+                return Math.max(floor, Math.min(adaptiveTarget, currentSpeed));
             }
             return Math.min(adaptiveTarget, currentSpeed);
         }
@@ -598,13 +600,27 @@ ${errLines}
         return currentSpeed;
     }
 
+    function sendPassiveToIframe(passive) {
+        const iframe = document.querySelector('iframe[src*="vimeo.com"]');
+        if (!iframe) return;
+        try {
+            iframe.contentWindow.postMessage(
+                { __epicodeFlow: true, type: 'set-passive', value: !!passive },
+                'https://player.vimeo.com'
+            );
+        } catch (_) {}
+    }
+
     function ensureEffectiveSpeed() {
         const eff = getEffectiveSpeed();
         if (eff !== lastEffectiveSpeed) {
             lastEffectiveSpeed = eff;
             sendSpeedToIframe(eff);
-            const v = findMeetingVideo();
-            if (v) { try { v.playbackRate = eff; } catch (_) {} }
+            // Meeting Video.js: forza playbackRate solo se autoMode (passive lascia controllo a utente)
+            if (autoMode) {
+                const v = findMeetingVideo();
+                if (v) { try { v.playbackRate = eff; } catch (_) {} }
+            }
         }
     }
 
@@ -765,8 +781,10 @@ ${errLines}
             ensureMeetingDetail();
         }
         applyAutoMute();
-        // Forza playback rate
-        try { v.playbackRate = currentSpeed; } catch (_) {}
+        // Forza playback rate solo se autoMode attivo (autoMode off → utente controlla)
+        if (autoMode) {
+            try { v.playbackRate = currentSpeed; } catch (_) {}
+        }
         // Auto-play (utente potrebbe aver disabilitato autoplay con suono)
         // Strategia: prova prima unmuted; se autoplay policy blocca, retry con muted + unmute post-play
         if (autoMode && scriptActive && !userPaused && v.paused && !meetingAutoPlayed) {
@@ -1356,11 +1374,15 @@ ${errLines}
         autoMode = !autoMode;
         const btn = document.getElementById('m-auto');
         if (autoMode) {
-            btn.innerText = '⏹ BLOCCA AUTO';
-            btn.style.background = '#166534';
+            if (btn) { btn.innerText = '⏹ BLOCCA AUTO'; btn.style.background = '#166534'; }
+            // Ri-attiva enforcement speed
+            sendPassiveToIframe(false);
+            lastEffectiveSpeed = null;
+            ensureEffectiveSpeed();
         } else {
-            btn.innerText = '▶ RIPRENDI AUTO';
-            btn.style.background = '#7f1d1d';
+            if (btn) { btn.innerText = '▶ RIPRENDI AUTO'; btn.style.background = '#7f1d1d'; }
+            // Passive: lascia controllo velocità all'utente (Vimeo controls o video.js)
+            sendPassiveToIframe(true);
         }
     }
 
@@ -1919,6 +1941,8 @@ ${errLines}
                 _autoMuted = false;
                 _pageEntryTimers.push(setTimeout(applyAutoMute, 1500));
                 _pageEntryTimers.push(setTimeout(applyAutoMute, 3000));
+                // Sync passive flag su nuovo iframe (autoMode off → passive true)
+                _pageEntryTimers.push(setTimeout(() => sendPassiveToIframe(!autoMode), 1500));
             }
 
             // Near-end skip gestito in tickVideoEnd() ogni 500ms (reazione veloce).

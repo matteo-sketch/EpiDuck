@@ -189,6 +189,8 @@
         if (d.type === 'set-speed' && typeof d.speed === 'number') {
             currentSpeed = d.speed;
             applySpeed(true); // force: lastAppliedSpeed cambia, va riapplicato
+        } else if (d.type === 'set-passive') {
+            try { document.dispatchEvent(new CustomEvent('__epicodeflow-passive', { detail: !!d.value })); } catch (_) {}
         }
     });
 
