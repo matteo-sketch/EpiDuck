@@ -2538,7 +2538,8 @@ ${errLines}
         if (!body || document.getElementById('m-version-footer')) return;
         let ver = '';
         try { ver = chrome.runtime.getManifest().version; } catch (_) {}
-        const verShort = `v${(ver || '').split('.')[0] || ver}`;
+        // Mostra versione completa (es. v64.4, non solo v64)
+        const verShort = `v${ver || '?'}`;
         const v = document.createElement('div');
         v.id = 'm-version-footer';
         v.style.cssText = 'display:grid;grid-template-columns:2fr 2fr 1fr;gap:4px;align-items:stretch;margin-top:6px;padding-top:4px;border-top:1px dashed #2a1054;font-family:monospace;';

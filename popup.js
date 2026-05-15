@@ -15,13 +15,20 @@
 
     const enabledToggle = document.getElementById('enabled-toggle');
     const enabledState  = document.getElementById('enabled-state');
+    const powerBtn      = document.getElementById('power-btn');
 
     function reflectEnabled(enabled) {
         enabledToggle.checked = enabled;
         enabledState.textContent = enabled
             ? 'Attiva su learn.epicode.edu.mt'
-            : 'Disabilitata globalmente';
-        enabledState.style.color = enabled ? '#2ecc71' : '#e74c3c';
+            : 'Spenta globalmente';
+        enabledState.style.color = enabled ? '#10b981' : '#ef4444';
+        if (powerBtn) {
+            powerBtn.classList.toggle('is-on', enabled);
+            powerBtn.classList.toggle('is-off', !enabled);
+            powerBtn.title = enabled ? 'Spegni EpiDuck globalmente' : 'Accendi EpiDuck';
+            powerBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+        }
     }
 
     chrome.storage.local.get(['epiduckEnabled'], (r) => {
@@ -29,6 +36,13 @@
         reflectEnabled(en);
     });
 
+    function togglePower() {
+        const next = !enabledToggle.checked;
+        enabledToggle.checked = next;
+        chrome.storage.local.set({ epiduckEnabled: next }, () => reflectEnabled(next));
+    }
+
+    if (powerBtn) powerBtn.addEventListener('click', togglePower);
     enabledToggle.addEventListener('change', () => {
         const en = enabledToggle.checked;
         chrome.storage.local.set({ epiduckEnabled: en }, () => reflectEnabled(en));

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "EpiDuck",
-  "version": "64.4",
+  "version": "64.5",
   "description": "Auto-play, velocità configurabile, qualità per dominio, auto-skip, transcript, Estrai Corso → MD/Notion/AI.",
   "permissions": ["storage"],
   "host_permissions": [
