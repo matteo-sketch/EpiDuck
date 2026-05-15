@@ -265,6 +265,43 @@ ${errLines}
     let autoQualityActive = false;
     let lastSpeedForQualityCheck = currentSpeed;
 
+    // ---------- Auto-mute a velocità > 3x (audio chipmunk inutile + lieve perf save) ----------
+    const AUTO_MUTE_SPEED_THRESHOLD = 3; // > 3x → muta
+    const AUTO_MUTE_KEY = 'epicode_automute';
+    let autoMuteEnabled = localStorage.getItem(AUTO_MUTE_KEY) !== '0'; // default ON
+    let _autoMuted = false; // true se siamo stati noi a mutare (per ripristinare)
+
+    function _muteAll() {
+        const iframe = document.querySelector('iframe[src*="vimeo.com"]');
+        if (iframe && typeof vimeoCmd === 'function') vimeoCmd(iframe, 'setVolume', 0);
+        const v = (typeof findMeetingVideo === 'function') ? findMeetingVideo() : null;
+        if (v) try { v.muted = true; } catch (_) {}
+    }
+    function _unmuteAll() {
+        const iframe = document.querySelector('iframe[src*="vimeo.com"]');
+        if (iframe && typeof vimeoCmd === 'function') vimeoCmd(iframe, 'setVolume', 1);
+        const v = (typeof findMeetingVideo === 'function') ? findMeetingVideo() : null;
+        if (v) try { v.muted = false; } catch (_) {}
+    }
+    function applyAutoMute() {
+        if (!autoMuteEnabled) {
+            if (_autoMuted) { _unmuteAll(); _autoMuted = false; }
+            return;
+        }
+        const shouldMute = currentSpeed > AUTO_MUTE_SPEED_THRESHOLD;
+        if (shouldMute && !_autoMuted) { _muteAll(); _autoMuted = true; }
+        else if (!shouldMute && _autoMuted) { _unmuteAll(); _autoMuted = false; }
+        else if (shouldMute && _autoMuted) {
+            // Re-asserisci su iframe nuovo / Vimeo che resetta volume
+            _muteAll();
+        }
+    }
+    function setAutoMuteEnabled(on) {
+        autoMuteEnabled = !!on;
+        localStorage.setItem(AUTO_MUTE_KEY, on ? '1' : '0');
+        applyAutoMute();
+    }
+
     // ---------- Hold-to-speed (keyboard) ----------
     const HOLD_KEY = 'Shift';
     const HOLD_MULTIPLIER = 2;
@@ -704,8 +741,10 @@ ${errLines}
             pageEntryServerPct = null;
             serverWatchdog = { lastPct: -1, lastChangeTs: 0 };
             _navRetryCount = 0;
+            _autoMuted = false;
             ensureMeetingDetail();
         }
+        applyAutoMute();
         // Forza playback rate
         try { v.playbackRate = currentSpeed; } catch (_) {}
         // Auto-play (utente potrebbe aver disabilitato autoplay con suono)
@@ -719,8 +758,11 @@ ${errLines}
                 if (p && typeof p.catch === 'function') {
                     p.then(() => {
                         if (muteFirst) {
-                            // Unmute dopo che autoplay riesce — utente vuole audio
-                            setTimeout(() => { try { v.muted = false; } catch (_) {} }, 400);
+                            // Unmute dopo che autoplay riesce — ma solo se auto-mute non lo vuole muto
+                            setTimeout(() => {
+                                if (autoMuteEnabled && currentSpeed > AUTO_MUTE_SPEED_THRESHOLD) return;
+                                try { v.muted = false; } catch (_) {}
+                            }, 400);
                         }
                     }).catch(() => {
                         if (!muteFirst) tryPlay(true);
@@ -865,6 +907,7 @@ ${errLines}
         lastEffectiveSpeed = null;
         ensureEffectiveSpeed();
         checkAutoQualityDrop();
+        applyAutoMute();
     }
 
     function renderQualityButtons() {
@@ -1829,6 +1872,10 @@ ${errLines}
                 }, 5000));
                 // Speed effective applicato in tickEpicodeCompletion (rileva tracker post-load)
                 _pageEntryTimers.push(setTimeout(ensureEffectiveSpeed, 1500));
+                // Auto-mute: nuovo iframe Vimeo resetta volume → riapplica dopo load
+                _autoMuted = false;
+                _pageEntryTimers.push(setTimeout(applyAutoMute, 1500));
+                _pageEntryTimers.push(setTimeout(applyAutoMute, 3000));
             }
 
             // Near-end skip gestito in tickVideoEnd() ogni 500ms (reazione veloce).
