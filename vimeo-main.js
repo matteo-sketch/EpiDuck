@@ -6,6 +6,7 @@
 
     let TARGET = 1.0;
     let active = false;
+    let userPassive = false; // true → no auto-reapply su ratechange (utente controlla manualmente)
     let preservesPitch = true; // mantieni tonalità (smoother audio)
     const TAG = '[EpicodeFlow/main]';
     const seen = new WeakSet();
@@ -60,8 +61,8 @@
     function attach(v) {
         if (seen.has(v)) return;
         seen.add(v);
-        if (active) setRateSafe(v, TARGET);
-        const reapply = () => { if (active) setRateSafe(v, TARGET); };
+        if (active && !userPassive) setRateSafe(v, TARGET);
+        const reapply = () => { if (active && !userPassive) setRateSafe(v, TARGET); };
         // Eventi RILEVANTI per perdita di playbackRate: niente timeupdate (troppo frequente)
         ['ratechange', 'play', 'playing', 'loadedmetadata', 'canplay', 'seeked']
             .forEach(ev => v.addEventListener(ev, reapply, { capture: true, passive: true }));
@@ -79,12 +80,13 @@
         }
     });
 
+    let _scanIntervalId = null;
     function startScanners() {
         if (document.documentElement) mo.observe(document.documentElement, { childList: true, subtree: true });
         scan(document);
         document.addEventListener('DOMContentLoaded', () => scan(document), true);
         // Polling raro: 1s invece di 500ms, e solo per cogliere player tardivi
-        setInterval(() => scan(document), 1000);
+        if (!_scanIntervalId) _scanIntervalId = setInterval(() => scan(document), 1000);
     }
 
     document.addEventListener('__epicodeflow-enable', () => {
@@ -99,12 +101,19 @@
     document.addEventListener('__epicodeflow-disable', () => {
         active = false;
         if (banner) banner.style.display = 'none';
+        if (_scanIntervalId) { clearInterval(_scanIntervalId); _scanIntervalId = null; }
+        try { mo.disconnect(); } catch (_) {}
     });
 
     document.addEventListener('__epicodeflow-speed', (e) => {
         TARGET = +e.detail || 1;
         updateBanner();
-        if (active) document.querySelectorAll('video').forEach(v => setRateSafe(v, TARGET));
+        if (active && !userPassive) document.querySelectorAll('video').forEach(v => setRateSafe(v, TARGET));
+    });
+
+    document.addEventListener('__epicodeflow-passive', (e) => {
+        userPassive = !!e.detail;
+        if (banner) banner.textContent = userPassive ? `⏸ ${TARGET}x (manuale)` : `▶ ${TARGET}x`;
     });
 
     document.addEventListener('__epicodeflow-pitch', (e) => {

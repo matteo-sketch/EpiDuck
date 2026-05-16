@@ -57,6 +57,96 @@
         lastUpdate: 0
     };
     let autoSkipArmed = true;
+    let userPaused    = false; // utente ha messo pausa manuale → no auto-play
+
+    // ---------- StayAwake (Screen Wake Lock API) ----------
+    const STAYAWAKE_KEY = 'epicode_stayawake';
+    let stayawakeEnabled = localStorage.getItem(STAYAWAKE_KEY) !== '0'; // default ON
+    let _wakeLockSentinel = null;
+    let _wakeLockDesired = false;
+
+    async function acquireWakeLock() {
+        if (_wakeLockSentinel) return true;
+        if (!('wakeLock' in navigator)) return false;
+        try {
+            _wakeLockSentinel = await navigator.wakeLock.request('screen');
+            _wakeLockSentinel.addEventListener('release', () => { _wakeLockSentinel = null; renderStayawakeIndicator(); });
+            renderStayawakeIndicator();
+            return true;
+        } catch (_) {
+            _wakeLockSentinel = null;
+            return false;
+        }
+    }
+
+    function releaseWakeLock() {
+        if (!_wakeLockSentinel) return;
+        try { _wakeLockSentinel.release(); } catch (_) {}
+        _wakeLockSentinel = null;
+        renderStayawakeIndicator();
+    }
+
+    function stayawakeShouldBeActive() {
+        if (!stayawakeEnabled || !scriptActive) return false;
+        if (courseFinished) return false; // fine corso → PC libero
+        if (isExtracting) return true;
+        // Video Vimeo in riproduzione (auto on, fresh data, not paused)
+        const fresh = videoState.lastUpdate > 0 && (Date.now() - videoState.lastUpdate) < 6000;
+        if (autoMode && fresh && !videoState.paused && !videoState.ended) return true;
+        // Meeting Video.js in riproduzione
+        const v = (typeof findMeetingVideo === 'function') ? findMeetingVideo() : null;
+        if (autoMode && v && !v.paused && !v.ended) return true;
+        return false;
+    }
+
+    function tickStayawake() {
+        const want = stayawakeShouldBeActive();
+        _wakeLockDesired = want;
+        if (want && !_wakeLockSentinel) acquireWakeLock();
+        else if (!want && _wakeLockSentinel) releaseWakeLock();
+    }
+
+    // Wake lock auto-released quando document hidden → re-acquire al visible
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && _wakeLockDesired && !_wakeLockSentinel) {
+            acquireWakeLock();
+        }
+    });
+
+    function setStayawakeEnabled(on) {
+        stayawakeEnabled = !!on;
+        localStorage.setItem(STAYAWAKE_KEY, on ? '1' : '0');
+        renderStayawakeIndicator();
+        tickStayawake();
+    }
+
+    function renderStayawakeIndicator() {
+        const el = document.getElementById('m-stayawake');
+        if (!el) return;
+        const active = !!_wakeLockSentinel;
+        const supported = 'wakeLock' in navigator;
+        if (!supported) {
+            el.textContent = '☾⃠';
+            el.title = 'StayAwake non supportato dal browser';
+            el.style.color = '#6b57a0';
+            return;
+        }
+        if (!stayawakeEnabled) {
+            el.textContent = '☾';
+            el.title = 'StayAwake OFF (click per abilitare)';
+            el.style.color = '#6b57a0';
+            return;
+        }
+        if (active) {
+            el.textContent = '☀';
+            el.title = 'StayAwake attivo — PC non andrà in standby';
+            el.style.color = '#fde047';
+            return;
+        }
+        el.textContent = '☾';
+        el.title = 'StayAwake abilitato (idle, attivo solo durante riproduzione/estrazione)';
+        el.style.color = '#a78bfa';
+    }
 
     let measuredRate    = 0;
     let lastWallTs      = 0;
@@ -68,23 +158,59 @@
 
     // ---------- Auto error capture + bug report ----------
     const ERROR_BUFFER_KEY = 'epicode_error_buffer';
+    const ERROR_BUFFER_VERSION_KEY = 'epicode_error_buffer_version';
     const MAX_ERRORS = 50;
     const REPO_ISSUES_URL = 'https://github.com/matteo-sketch/EpiDuck/issues/new';
+    const CURRENT_VERSION = (() => { try { return chrome.runtime.getManifest().version; } catch (_) { return ''; } })();
+
+    // Pulizia buffer cross-version: se cambia versione, errori vecchi non valgono più
+    try {
+        chrome.storage.local.get([ERROR_BUFFER_VERSION_KEY], (r) => {
+            if (r[ERROR_BUFFER_VERSION_KEY] !== CURRENT_VERSION) {
+                chrome.storage.local.set({
+                    [ERROR_BUFFER_KEY]: [],
+                    [ERROR_BUFFER_VERSION_KEY]: CURRENT_VERSION
+                });
+            }
+        });
+    } catch (_) {}
+
+    // Fetch helper con timeout (AbortController) — default 30s
+    function _fetchWithTimeout(url, opts = {}, timeoutMs = 30000) {
+        const controller = new AbortController();
+        const id = setTimeout(() => { try { controller.abort(); } catch (_) {} }, timeoutMs);
+        const finalOpts = { ...opts };
+        if (!finalOpts.signal) finalOpts.signal = controller.signal;
+        return fetch(url, finalOpts).finally(() => clearTimeout(id));
+    }
+
+    function _anonymizeRef(s) {
+        if (!s) return s;
+        // Strip query string + path tail per URL non extension (privacy):
+        // - chrome-extension://abc/epicode.js:123 → preservato
+        // - https://learn.epicode.edu.mt/course/330/curriculum/12345?token=abc → https://learn.epicode.edu.mt/...
+        return String(s).replace(/(https?:\/\/[^/\s]+)\/[^\s)]*/g, '$1/...');
+    }
 
     function bufferError(payload) {
         try {
+            const sanitized = { ...payload };
+            if (sanitized.stack) sanitized.stack = _anonymizeRef(sanitized.stack);
+            if (sanitized.file)  sanitized.file  = _anonymizeRef(sanitized.file);
             chrome.storage.local.get([ERROR_BUFFER_KEY], (r) => {
                 const buf = (r[ERROR_BUFFER_KEY] || []);
-                buf.push({ ts: Date.now(), ...payload });
+                buf.push({ ts: Date.now(), v: CURRENT_VERSION, ...sanitized });
                 while (buf.length > MAX_ERRORS) buf.shift();
                 chrome.storage.local.set({ [ERROR_BUFFER_KEY]: buf });
             });
         } catch (_) {}
     }
 
-    function isOwnError(filename, msg) {
-        const s = `${filename || ''} ${msg || ''}`;
-        return /epicduck|epiduck|epicode\.js|vimeo\.js|vimeo-main\.js|EpicodeFlow/i.test(s);
+    function isOwnError(filename, msgOrStack) {
+        const ref = `${filename || ''} ${msgOrStack || ''}`;
+        // Solo errori provenienti da file dell'extension (chrome-extension://) E nostri moduli
+        if (!/chrome-extension:\/\//.test(ref)) return false;
+        return /epicode\.js|vimeo\.js|vimeo-main\.js|EpicodeFlow/i.test(ref);
     }
 
     window.addEventListener('error', (e) => {
@@ -160,6 +286,43 @@ ${errLines}
     let autoQualityActive = false;
     let lastSpeedForQualityCheck = currentSpeed;
 
+    // ---------- Auto-mute a velocità > 3x (audio chipmunk inutile + lieve perf save) ----------
+    const AUTO_MUTE_SPEED_THRESHOLD = 3; // > 3x → muta
+    const AUTO_MUTE_KEY = 'epicode_automute';
+    let autoMuteEnabled = localStorage.getItem(AUTO_MUTE_KEY) !== '0'; // default ON
+    let _autoMuted = false; // true se siamo stati noi a mutare (per ripristinare)
+
+    function _muteAll() {
+        const iframe = document.querySelector('iframe[src*="vimeo.com"]');
+        if (iframe && typeof vimeoCmd === 'function') vimeoCmd(iframe, 'setVolume', 0);
+        const v = (typeof findMeetingVideo === 'function') ? findMeetingVideo() : null;
+        if (v) try { v.muted = true; } catch (_) {}
+    }
+    function _unmuteAll() {
+        const iframe = document.querySelector('iframe[src*="vimeo.com"]');
+        if (iframe && typeof vimeoCmd === 'function') vimeoCmd(iframe, 'setVolume', 1);
+        const v = (typeof findMeetingVideo === 'function') ? findMeetingVideo() : null;
+        if (v) try { v.muted = false; } catch (_) {}
+    }
+    function applyAutoMute() {
+        if (!autoMuteEnabled) {
+            if (_autoMuted) { _unmuteAll(); _autoMuted = false; }
+            return;
+        }
+        const shouldMute = currentSpeed > AUTO_MUTE_SPEED_THRESHOLD;
+        if (shouldMute && !_autoMuted) { _muteAll(); _autoMuted = true; }
+        else if (!shouldMute && _autoMuted) { _unmuteAll(); _autoMuted = false; }
+        else if (shouldMute && _autoMuted) {
+            // Re-asserisci su iframe nuovo / Vimeo che resetta volume
+            _muteAll();
+        }
+    }
+    function setAutoMuteEnabled(on) {
+        autoMuteEnabled = !!on;
+        localStorage.setItem(AUTO_MUTE_KEY, on ? '1' : '0');
+        applyAutoMute();
+    }
+
     // ---------- Hold-to-speed (keyboard) ----------
     const HOLD_KEY = 'Shift';
     const HOLD_MULTIPLIER = 2;
@@ -217,6 +380,44 @@ ${errLines}
             }
         }
     });
+
+    // ---------- Keyboard shortcuts ----------
+    // Cmd/Ctrl+Shift+S = skip lezione | P = play/pause | +/- = ciclo velocità
+    document.addEventListener('keydown', (e) => {
+        if (!scriptActive) return;
+        if (isTypingTarget(e.target)) return;
+        if (e.repeat) return;
+
+        // Cmd/Ctrl+Shift+S → skip
+        if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'S' || e.key === 's')) {
+            e.preventDefault();
+            if (typeof manualSkip === 'function') manualSkip();
+            return;
+        }
+        // Senza modificatori
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        const k = e.key;
+
+        if ((k === 'p' || k === 'P') && !e.shiftKey) {
+            e.preventDefault();
+            if (typeof togglePlayPause === 'function') togglePlayPause();
+            return;
+        }
+        if (k === '+' || k === '=') {
+            e.preventDefault();
+            const idx = SPEEDS.indexOf(currentSpeed);
+            const next = idx >= 0 ? SPEEDS[Math.min(SPEEDS.length - 1, idx + 1)] : SPEEDS[SPEEDS.length - 1];
+            if (next !== currentSpeed && typeof setSpeed === 'function') setSpeed(next);
+            return;
+        }
+        if (k === '-' || k === '_') {
+            e.preventDefault();
+            const idx = SPEEDS.indexOf(currentSpeed);
+            const next = idx > 0 ? SPEEDS[idx - 1] : SPEEDS[0];
+            if (next !== currentSpeed && typeof setSpeed === 'function') setSpeed(next);
+            return;
+        }
+    }, true);
 
     // ---------- Widget completamento Epicode (in alto a destra) ----------
     // Cache: l'elemento è lo stesso fra tick, validare prima di ri-cercare nel DOM
@@ -297,6 +498,17 @@ ${errLines}
     let pageLoadTs = Date.now();
     let serverWatchdog = { lastPct: -1, lastChangeTs: 0 };
 
+    // Timer pendenti su nuova lezione → da cancellare al cambio iframe per evitare race
+    let _pageEntryTimers = [];
+    function clearPageEntryTimers() {
+        for (const id of _pageEntryTimers) { try { clearTimeout(id); } catch (_) {} }
+        _pageEntryTimers = [];
+    }
+
+    // Retry cap forzaNavigazione (evita loop eterno fine corso)
+    const MAX_NAV_RETRY = 10;
+    let _navRetryCount = 0;
+
     function tickServerWatchdog() {
         if (!isTrackedLesson()) {
             serverWatchdog.lastPct = -1;
@@ -351,9 +563,10 @@ ${errLines}
         lastAdaptiveCheckTs = now;
 
         const prev = adaptiveTarget;
+        // Floor effettivo: mai sopra la scelta utente (issue #3 — utente picks 1.25 non deve diventare 2)
+        const floor = Math.min(ADAPTIVE_FLOOR, currentSpeed);
         if (isServerStuck()) {
-            // Halve target, floor 2x
-            adaptiveTarget = Math.max(ADAPTIVE_FLOOR, Math.floor(adaptiveTarget / 2));
+            adaptiveTarget = Math.max(floor, Math.floor(adaptiveTarget / 2));
         } else if (isServerSmooth() && adaptiveTarget < currentSpeed) {
             // Server tiene, ramp up verso il max scelto
             const next = Math.min(currentSpeed, ADAPTIVE_CEILING, Math.ceil(adaptiveTarget * 1.5));
@@ -370,9 +583,10 @@ ${errLines}
         if (speedMode === 'forced') return currentSpeed;
         // Adattiva: usa adaptiveTarget (variabile) se tracker presente
         if (isTrackedLesson()) {
-            // Fallback emergenza: se server stuck molto (>SERVER_STUCK_MS), forza floor
+            // Floor effettivo capato a scelta utente (mai sopra currentSpeed)
+            const floor = Math.min(ADAPTIVE_FLOOR, currentSpeed);
             if (isServerStuck()) {
-                return Math.max(ADAPTIVE_FLOOR, Math.min(adaptiveTarget, currentSpeed));
+                return Math.max(floor, Math.min(adaptiveTarget, currentSpeed));
             }
             return Math.min(adaptiveTarget, currentSpeed);
         }
@@ -387,13 +601,27 @@ ${errLines}
         return currentSpeed;
     }
 
+    function sendPassiveToIframe(passive) {
+        const iframe = document.querySelector('iframe[src*="vimeo.com"]');
+        if (!iframe) return;
+        try {
+            iframe.contentWindow.postMessage(
+                { __epicodeFlow: true, type: 'set-passive', value: !!passive },
+                'https://player.vimeo.com'
+            );
+        } catch (_) {}
+    }
+
     function ensureEffectiveSpeed() {
         const eff = getEffectiveSpeed();
         if (eff !== lastEffectiveSpeed) {
             lastEffectiveSpeed = eff;
             sendSpeedToIframe(eff);
-            const v = findMeetingVideo();
-            if (v) { try { v.playbackRate = eff; } catch (_) {} }
+            // Meeting Video.js: forza playbackRate solo se autoMode (passive lascia controllo a utente)
+            if (autoMode) {
+                const v = findMeetingVideo();
+                if (v) { try { v.playbackRate = eff; } catch (_) {} }
+            }
         }
     }
 
@@ -450,6 +678,22 @@ ${errLines}
             if (skipEl) { skipEl.innerText = `Skip: server ${server}% ≥ ${threshold}% → vado`; skipEl.style.color = '#2ecc71'; }
             const status = document.getElementById('m-status');
             if (status) { status.innerText = `Server ${server}% ≥ ${threshold}% → skip`; status.style.color = '#4ade80'; }
+            setTimeout(forzaNavigazione, 300);
+            return;
+        }
+
+        // FALLBACK: server stuck oltre HARD_STUCK_MS + own >= OWN_FALLBACK_THRESHOLD → skip forzato
+        const SERVER_HARD_STUCK_MS = 120000; // 2min
+        const OWN_FALLBACK_THRESHOLD = 95;
+        if (own != null && own >= OWN_FALLBACK_THRESHOLD &&
+            serverWatchdog.lastChangeTs > 0 &&
+            (Date.now() - serverWatchdog.lastChangeTs) > SERVER_HARD_STUCK_MS) {
+            autoSkipArmed = false;
+            markVideoCompleted();
+            const skipEl = document.getElementById('m-vid-skip');
+            if (skipEl) { skipEl.innerText = `Skip: fallback own ${own.toFixed(0)}% (srv stuck ${Math.floor((Date.now()-serverWatchdog.lastChangeTs)/1000)}s) → vado`; skipEl.style.color = '#2ecc71'; }
+            const status = document.getElementById('m-status');
+            if (status) { status.innerText = `Server bloccato — fallback own ${own.toFixed(0)}% → skip`; status.style.color = '#4ade80'; }
             setTimeout(forzaNavigazione, 300);
             return;
         }
@@ -529,14 +773,42 @@ ${errLines}
             meetingLastLessonId = lessonId;
             meetingAutoPlayed = false;
             autoSkipArmed = true;
+            userPaused = false;
+            pageLoadTs = Date.now();
+            pageEntryServerPct = null;
+            serverWatchdog = { lastPct: -1, lastChangeTs: 0 };
+            _navRetryCount = 0;
+            _autoMuted = false;
             ensureMeetingDetail();
         }
-        // Forza playback rate
-        try { v.playbackRate = currentSpeed; } catch (_) {}
+        applyAutoMute();
+        // Forza playback rate solo se autoMode attivo (autoMode off → utente controlla)
+        if (autoMode) {
+            try { v.playbackRate = currentSpeed; } catch (_) {}
+        }
         // Auto-play (utente potrebbe aver disabilitato autoplay con suono)
-        if (autoMode && scriptActive && v.paused && !meetingAutoPlayed) {
+        // Strategia: prova prima unmuted; se autoplay policy blocca, retry con muted + unmute post-play
+        if (autoMode && scriptActive && !userPaused && v.paused && !meetingAutoPlayed) {
             meetingAutoPlayed = true;
-            try { v.muted = true; v.play().catch(() => {}); } catch (_) {}
+            const tryPlay = (muteFirst) => {
+                if (muteFirst) { try { v.muted = true; } catch (_) {} }
+                let p;
+                try { p = v.play(); } catch (_) { return; }
+                if (p && typeof p.catch === 'function') {
+                    p.then(() => {
+                        if (muteFirst) {
+                            // Unmute dopo che autoplay riesce — ma solo se auto-mute non lo vuole muto
+                            setTimeout(() => {
+                                if (autoMuteEnabled && currentSpeed > AUTO_MUTE_SPEED_THRESHOLD) return;
+                                try { v.muted = false; } catch (_) {}
+                            }, 400);
+                        }
+                    }).catch(() => {
+                        if (!muteFirst) tryPlay(true);
+                    });
+                }
+            };
+            tryPlay(false);
             const btn = document.querySelector('.vjs-big-play-button');
             if (btn && v.paused) try { btn.click(); } catch (_) {}
         }
@@ -674,6 +946,7 @@ ${errLines}
         lastEffectiveSpeed = null;
         ensureEffectiveSpeed();
         checkAutoQualityDrop();
+        applyAutoMute();
     }
 
     function renderQualityButtons() {
@@ -807,7 +1080,7 @@ ${errLines}
         const blocks = buildNotionBlocks();
 
         try {
-            const res = await fetch('https://api.notion.com/v1/pages', {
+            const res = await _fetchWithTimeout('https://api.notion.com/v1/pages', {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${notionSettings.apiKey}`,
@@ -855,6 +1128,7 @@ ${errLines}
             <span id="m-duck" style="flex-shrink:0;display:inline-flex;align-items:center;">${DUCK_SVG_INLINE}</span>
             <span id="m-state-icon" style="font-size:14px;flex-shrink:0;">⏳</span>
             <div id="m-status" style="color:#a78bfa;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;">ANALISI...</div>
+            <button id="m-stayawake" title="StayAwake" style="background:none;border:none;cursor:pointer;color:#a78bfa;font-size:14px;padding:0 2px;line-height:1;flex-shrink:0;">☾</button>
             <button id="m-settings" title="Impostazioni" style="background:none;border:none;cursor:pointer;color:#67e8f9;font-size:14px;padding:0 4px;line-height:1;flex-shrink:0;">⚙</button>
             <button id="m-toggle" title="Minimizza/espandi" style="background:none;border:none;cursor:pointer;color:#7c3aed;font-size:17px;font-weight:bold;padding:0 0 0 4px;line-height:1;flex-shrink:0;">▾</button>
         </div>
@@ -899,6 +1173,39 @@ ${errLines}
     `;
     document.body.appendChild(box);
 
+    // ---------- Light mode CSS (prefers-color-scheme) ----------
+    if (!document.getElementById('m-light-style')) {
+        const lightStyle = document.createElement('style');
+        lightStyle.id = 'm-light-style';
+        lightStyle.textContent = `
+        @media (prefers-color-scheme: light) {
+            #m-box-main {
+                background: #faf9ff !important;
+                color: #1e1b3a !important;
+                border-color: #7c3aed !important;
+                box-shadow: 0 4px 24px rgba(124,58,237,0.25) !important;
+            }
+            #m-box-main #m-status { color: #6d28d9 !important; }
+            #m-box-main #m-timer,
+            #m-box-main #m-vinfo,
+            #m-box-main #m-vid-skip:not([style*="color:#"]),
+            #m-box-main #m-transcript-count,
+            #m-box-main #m-save-status { color: #6b57a0 !important; }
+            #m-box-main #m-vid-time,
+            #m-box-main #m-vid-remain { color: #1e1b3a !important; }
+            #m-box-main #m-debug { color: #9b87d6 !important; }
+            #m-box-main #m-settings { color: #0891b2 !important; }
+            #m-box-main #m-toggle { color: #7c3aed !important; }
+            #m-box-main #m-stayawake { color: #6d28d9 !important; }
+            #m-box-main button#m-playpause { background: #ede9fe !important; color: #2a1054 !important; }
+            #m-box-main button#m-save-file { background: #dbeafe !important; color: #1e3a5f !important; }
+            #m-box-main button#m-save-notion { background: #ede9fe !important; color: #3b1f6e !important; }
+            #m-box-main button#m-copy-transcript { background: #d1fae5 !important; color: #065f46 !important; border-color: #10b981 !important; }
+        }
+        `;
+        document.head.appendChild(lightStyle);
+    }
+
     // ---------- Drag-to-move ----------
     (function makeDraggable() {
         const header = document.getElementById('m-header');
@@ -906,14 +1213,36 @@ ${errLines}
         header.style.cursor = 'move';
         let dragging = false, offX = 0, offY = 0, moved = false;
         const POS_KEY = `epicode_box_pos_${location.hostname}`;
+        const MIN_VISIBLE_X = 80; // pixel minimi visibili da bordo dx
+        const MIN_VISIBLE_Y = 30; // pixel minimi visibili da bordo bottom
+
+        function clampPos(left, top) {
+            return {
+                left: Math.max(0, Math.min(window.innerWidth  - MIN_VISIBLE_X, left)),
+                top:  Math.max(0, Math.min(window.innerHeight - MIN_VISIBLE_Y, top))
+            };
+        }
+
         try {
             const saved = JSON.parse(localStorage.getItem(POS_KEY) || 'null');
             if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
-                box.style.left = Math.max(0, Math.min(window.innerWidth - 80, saved.left)) + 'px';
-                box.style.top  = Math.max(0, Math.min(window.innerHeight - 30, saved.top))  + 'px';
+                const c = clampPos(saved.left, saved.top);
+                box.style.left = c.left + 'px';
+                box.style.top  = c.top + 'px';
                 box.style.right = 'auto';
             }
         } catch (e) {}
+
+        // Re-clamp on window resize (utente potrebbe ridurre finestra dopo drag)
+        window.addEventListener('resize', () => {
+            if (!box.style.left || box.style.left === 'auto') return;
+            const rect = box.getBoundingClientRect();
+            const c = clampPos(rect.left, rect.top);
+            box.style.left = c.left + 'px';
+            box.style.top  = c.top + 'px';
+            try { localStorage.setItem(POS_KEY, JSON.stringify(c)); } catch (_) {}
+        });
+
         header.addEventListener('mousedown', (e) => {
             if (e.target.closest('button')) return;
             const rect = box.getBoundingClientRect();
@@ -929,10 +1258,9 @@ ${errLines}
         document.addEventListener('mousemove', (e) => {
             if (!dragging) return;
             moved = true;
-            const x = Math.max(0, Math.min(window.innerWidth  - 40, e.clientX - offX));
-            const y = Math.max(0, Math.min(window.innerHeight - 30, e.clientY - offY));
-            box.style.left = x + 'px';
-            box.style.top  = y + 'px';
+            const c = clampPos(e.clientX - offX, e.clientY - offY);
+            box.style.left = c.left + 'px';
+            box.style.top  = c.top + 'px';
         });
         document.addEventListener('mouseup', () => {
             if (!dragging) return;
@@ -956,6 +1284,11 @@ ${errLines}
     document.getElementById('m-settings').onclick = () => {
         try { window.open(chrome.runtime.getURL('popup.html'), '_blank'); } catch (e) { console.warn('openSettings', e); }
     };
+    document.getElementById('m-stayawake').onclick = () => {
+        if (!('wakeLock' in navigator)) return;
+        setStayawakeEnabled(!stayawakeEnabled);
+    };
+    renderStayawakeIndicator();
     renderSpeedModeToggle();
     renderSpeedButtons();
     renderQualityButtons();
@@ -968,6 +1301,7 @@ ${errLines}
         const btn  = document.getElementById('m-toggle');
         const status = document.getElementById('m-status');
         const settings = document.getElementById('m-settings');
+        const stayawake = document.getElementById('m-stayawake');
         const header = document.getElementById('m-header');
         if (!body || !btn) return;
         if (boxCollapsed) {
@@ -981,6 +1315,7 @@ ${errLines}
             btn.title = 'Apri pannello EpiDuck';
             if (status) status.style.display = 'none';
             if (settings) settings.style.display = 'none';
+            if (stayawake) stayawake.style.display = 'inline-block'; // visibile anche collapsed (utile vedere stato)
             if (header) header.style.cursor = 'pointer';
             box.style.width = '150px';
             box.style.padding = '6px 10px';
@@ -997,6 +1332,7 @@ ${errLines}
             btn.title = 'Minimizza pannello';
             if (status) status.style.display = 'block';
             if (settings) settings.style.display = 'inline-block';
+            if (stayawake) stayawake.style.display = 'inline-block';
             if (header) header.style.cursor = 'move';
             box.style.width = '260px';
             box.style.padding = '14px';
@@ -1025,13 +1361,13 @@ ${errLines}
         if (!iframe) return;
         const btn = document.getElementById('m-playpause');
         if (videoState.paused) {
+            userPaused = false;
             vimeoCmd(iframe, 'play');
-            btn.innerText = '⏸ PAUSA VIDEO';
-            btn.style.background = '#2a1054';
+            if (btn) { btn.innerText = '⏸ PAUSA VIDEO'; btn.style.background = '#2a1054'; }
         } else {
+            userPaused = true;
             vimeoCmd(iframe, 'pause');
-            btn.innerText = '▶ RIPRENDI';
-            btn.style.background = '#f97316';
+            if (btn) { btn.innerText = '▶ RIPRENDI'; btn.style.background = '#f97316'; }
         }
     }
 
@@ -1039,11 +1375,15 @@ ${errLines}
         autoMode = !autoMode;
         const btn = document.getElementById('m-auto');
         if (autoMode) {
-            btn.innerText = '⏹ BLOCCA AUTO';
-            btn.style.background = '#166534';
+            if (btn) { btn.innerText = '⏹ BLOCCA AUTO'; btn.style.background = '#166534'; }
+            // Ri-attiva enforcement speed
+            sendPassiveToIframe(false);
+            lastEffectiveSpeed = null;
+            ensureEffectiveSpeed();
         } else {
-            btn.innerText = '▶ RIPRENDI AUTO';
-            btn.style.background = '#7f1d1d';
+            if (btn) { btn.innerText = '▶ RIPRENDI AUTO'; btn.style.background = '#7f1d1d'; }
+            // Passive: lascia controllo velocità all'utente (Vimeo controls o video.js)
+            sendPassiveToIframe(true);
         }
     }
 
@@ -1138,7 +1478,7 @@ ${errLines}
         const tok = localStorage.getItem('auth_token');
         if (!tok) throw new Error('no auth_token');
         const url = `https://cms.epicode.com/items/content?filter%5Bcourses%5D%5Bcourse%5D%5B_eq%5D=${courseId}&fields=id,parent,sort,type,title&limit=-1`;
-        const r = await fetch(url, { credentials: 'include', headers: { Authorization: `Bearer ${tok}` } });
+        const r = await _fetchWithTimeout(url, { credentials: 'include', headers: { Authorization: `Bearer ${tok}` } });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = await r.json();
         const all = j.data || [];
@@ -1200,6 +1540,64 @@ ${errLines}
         return null;
     }
 
+    // ---------- End-of-course detection ----------
+    // True se lezione corrente è l'ultima leaf del curriculum (no next leaf dopo).
+    // Richiede cache curriculum caricato (altrimenti ritorna false per non bloccare prematuramente).
+    function isCourseLastLeaf() {
+        const lessonId = parseInt(getLessonId() || '', 10);
+        if (!lessonId) return false;
+        const ordered = curriculumCache.ordered;
+        if (!ordered || ordered.length < 2) return false;
+        const idx = ordered.findIndex(o => o.id === lessonId);
+        if (idx === -1) return false;
+        for (let i = idx + 1; i < ordered.length; i++) {
+            if (LEAF_TYPES.has(ordered[i].type)) return false;
+        }
+        return true;
+    }
+
+    let courseFinished = false;
+    let _courseFinishedFor = null; // courseId per cui è stato marcato (reset su cambio corso)
+
+    function markCourseFinished() {
+        const cid = getCourseId();
+        if (courseFinished && _courseFinishedFor === cid) return;
+        courseFinished = true;
+        _courseFinishedFor = cid;
+        autoMode = false;
+        autoSkipArmed = false;
+        noVideoDeadline = 0;
+        _navRetryCount = 0;
+        // UI: aggiorna button auto + status
+        const btnAuto = document.getElementById('m-auto');
+        if (btnAuto) { btnAuto.innerText = '▶ RIPRENDI AUTO'; btnAuto.style.background = '#7f1d1d'; }
+        const status = document.getElementById('m-status');
+        if (status) { status.innerText = '🎉 Corso completato — auto OFF, PC libero'; status.style.color = '#4ade80'; }
+        const skipEl = document.getElementById('m-vid-skip');
+        if (skipEl) { skipEl.innerText = 'Skip: fine corso'; skipEl.style.color = '#4ade80'; }
+        // Passive mode + rilascio wake lock (PC libero di andare in standby)
+        sendPassiveToIframe(true);
+        try { tickStayawake(); } catch (_) {}
+    }
+
+    function tickCourseEnd() {
+        if (!curriculumCache.ordered || curriculumCache.ordered.length === 0) return;
+        const isLast = isCourseLastLeaf();
+        // Reset se utente è tornato a lezione precedente (non più last leaf)
+        if (!isLast && courseFinished) {
+            courseFinished = false;
+            _courseFinishedFor = null;
+            return;
+        }
+        if (!isLast || courseFinished) return;
+        // Ultima lezione: aspetta che sia ragionevolmente completata prima di marcare fine
+        const { server, own } = getCurrentCompletionPct();
+        const eff = Math.max(server ?? 0, own ?? 0);
+        if (eff >= 90 || videoState.ended) {
+            markCourseFinished();
+        }
+    }
+
     function getNextLessonUrl() {
         const next = getNextLessonFromCache();
         const courseId = getCourseId();
@@ -1211,6 +1609,7 @@ ${errLines}
     ensureCurriculum();
 
     function renderCompletedDots() {
+        if (!scriptActive) return;
         let completed = [];
         let started = [];
         try { completed = JSON.parse(localStorage.getItem('epicode_completed_videos') || '[]'); } catch(e){}
@@ -1243,6 +1642,8 @@ ${errLines}
 
     // ---------- Listener da iframe Vimeo ----------
     window.addEventListener('message', (e) => {
+        // Solo iframe Vimeo player può mandarci messaggi __epicodeFlow
+        if (e.origin !== 'https://player.vimeo.com') return;
         const d = e.data;
         if (!d || typeof d !== 'object' || !d.__epicodeFlow) return;
 
@@ -1305,6 +1706,11 @@ ${errLines}
 
     function forzaNavigazione() {
         if (!scriptActive) return;
+        // 🎉 Fine corso: nessun next leaf → no nav, marca completato
+        if (isCourseLastLeaf()) {
+            markCourseFinished();
+            return;
+        }
         const status = document.getElementById('m-status');
 
         // 0. API CMS: precomputed next lesson URL (preferred path)
@@ -1354,13 +1760,20 @@ ${errLines}
             return;
         }
 
-        // 3. Nessuna opzione → re-arm e retry dopo 3s (PATCH)
+        // 3. Nessuna opzione → re-arm e retry dopo 3s (con cap)
         const nodes = getSidebarNodes();
         const lessonId = getLessonId();
+        _navRetryCount++;
+        if (_navRetryCount > MAX_NAV_RETRY) {
+            if (status) { status.innerText = `NAV: max retry (${MAX_NAV_RETRY}) raggiunti, mi fermo`; status.style.color = '#ef4444'; }
+            _navRetryCount = 0;
+            return;
+        }
         if (status) {
-            if (nodes.length === 0)   status.innerText = 'NAV: sidebar non trovata (retry 3s)';
-            else if (!lessonId)       status.innerText = 'NAV: ID non in URL (retry 3s)';
-            else                      status.innerText = 'NAV: nessun next (retry 3s)';
+            const tag = `[${_navRetryCount}/${MAX_NAV_RETRY}]`;
+            if (nodes.length === 0)   status.innerText = `NAV ${tag}: sidebar non trovata (retry 3s)`;
+            else if (!lessonId)       status.innerText = `NAV ${tag}: ID non in URL (retry 3s)`;
+            else                      status.innerText = `NAV ${tag}: nessun next (retry 3s)`;
         }
         autoSkipArmed = true;
         setTimeout(() => { if (scriptActive && autoMode) forzaNavigazione(); }, 3000);
@@ -1444,6 +1857,9 @@ ${errLines}
 
     let lastTrackedState = null;
     function updateVideoUI() {
+        if (!scriptActive) { releaseWakeLock(); return; }
+        tickCourseEnd();
+        tickStayawake();
         tickNoVideoCountdown();
         tickVideoEnd();
         const meetVid = findMeetingVideo();
@@ -1551,6 +1967,7 @@ ${errLines}
                 lastIframeSrc  = iframe.src;
                 qualityApplied = false;
                 autoSkipArmed  = true;
+                userPaused     = false;
                 forcedSkipDeadline = 0;
                 videoState.duration = 0;
                 videoState.currentTime = 0;
@@ -1567,28 +1984,36 @@ ${errLines}
                 pageLoadTs = Date.now();
                 serverWatchdog = { lastPct: -1, lastChangeTs: 0 };
                 autoQualityActive = false;
+                _navRetryCount = 0;
+                clearPageEntryTimers();
                 invalidatePctElCache();
-                setTimeout(checkAutoQualityDrop, 1500);
+                _pageEntryTimers.push(setTimeout(checkAutoQualityDrop, 1500));
                 ensureCurriculum();
                 meetingDetailCache = { lessonId: null, detail: null, inflight: null };
                 ensureMeetingDetail();
                 // Cattura % server iniziale dopo qualche secondo (page deve renderizzarlo)
-                setTimeout(() => {
+                _pageEntryTimers.push(setTimeout(() => {
                     const p = readEpicodeCompletionPct();
                     if (p != null && pageEntryServerPct == null) pageEntryServerPct = p;
-                }, 2500);
-                setTimeout(() => {
+                }, 2500));
+                _pageEntryTimers.push(setTimeout(() => {
                     const p = readEpicodeCompletionPct();
                     if (p != null && pageEntryServerPct == null) pageEntryServerPct = p;
-                }, 5000);
+                }, 5000));
                 // Speed effective applicato in tickEpicodeCompletion (rileva tracker post-load)
-                setTimeout(ensureEffectiveSpeed, 1500);
+                _pageEntryTimers.push(setTimeout(ensureEffectiveSpeed, 1500));
+                // Auto-mute: nuovo iframe Vimeo resetta volume → riapplica dopo load
+                _autoMuted = false;
+                _pageEntryTimers.push(setTimeout(applyAutoMute, 1500));
+                _pageEntryTimers.push(setTimeout(applyAutoMute, 3000));
+                // Sync passive flag su nuovo iframe (autoMode off → passive true)
+                _pageEntryTimers.push(setTimeout(() => sendPassiveToIframe(!autoMode), 1500));
             }
 
             // Near-end skip gestito in tickVideoEnd() ogni 500ms (reazione veloce).
 
-            status.innerText = autoMode ? 'VIDEO RILEVATO' : 'VIDEO (AUTO OFF)';
-            if (autoMode && videoState.paused !== false) vimeoCmd(iframe, 'play');
+            if (!courseFinished) status.innerText = autoMode ? 'VIDEO RILEVATO' : 'VIDEO (AUTO OFF)';
+            if (autoMode && !userPaused && videoState.paused !== false) vimeoCmd(iframe, 'play');
             applyQuality(iframe);
             updateVinfo();
             updateVideoUI();
@@ -1598,7 +2023,7 @@ ${errLines}
 
             if (autoMode && fresh && !videoState.paused && realTime >= 0 && Math.abs(realTime - lastProgress) < 0.05) {
                 stasiCount++;
-                status.innerText = `VIDEO FERMO (${stasiCount}/15)`;
+                if (!courseFinished) status.innerText = `VIDEO FERMO (${stasiCount}/15)`;
                 if (stasiCount >= 15) {
                     stasiCount = 0;
                     forzaNavigazione();
@@ -1606,9 +2031,11 @@ ${errLines}
             } else {
                 stasiCount   = 0;
                 lastProgress = realTime;
-                status.innerText = videoState.duration > 0
-                    ? `IN RIPRODUZIONE: ${fmt(videoState.currentTime)} / ${fmt(videoState.duration)}`
-                    : 'IN RIPRODUZIONE...';
+                if (!courseFinished) {
+                    status.innerText = videoState.duration > 0
+                        ? `IN RIPRODUZIONE: ${fmt(videoState.currentTime)} / ${fmt(videoState.duration)}`
+                        : 'IN RIPRODUZIONE...';
+                }
             }
 
         } else {
@@ -1622,10 +2049,18 @@ ${errLines}
                 updateVideoUI();
                 ensureCurriculum();
                 const apiHasNext = !!getNextLessonFromCache();
-                if (!apiHasNext) {
-                    status.innerText = 'NON VIDEO — fine sezione';
-                    status.style.color = '#f59e0b';
+                if (courseFinished) {
+                    // Status già scritto da markCourseFinished — non sovrascrivere
                     noVideoDeadline = 0;
+                } else if (!apiHasNext) {
+                    // Ultima leaf → marca fine corso (cache curriculum carica)
+                    if (isCourseLastLeaf()) {
+                        markCourseFinished();
+                    } else {
+                        status.innerText = 'NON VIDEO — fine sezione';
+                        status.style.color = '#f59e0b';
+                        noVideoDeadline = 0;
+                    }
                 } else if (!autoMode) {
                     status.innerText = 'NON VIDEO — AUTO OFF, premi SKIP';
                     status.style.color = '#f59e0b';
@@ -1675,7 +2110,7 @@ ${errLines}
 
     async function fetchContentDetail(id) {
         const tok = localStorage.getItem('auth_token');
-        const r = await fetch(`https://cms.epicode.com/items/content/${id}?fields=id,title,type,parent,sort,is_translated,summary,markdown,body,url,video_duration,embed_type`, {
+        const r = await _fetchWithTimeout(`https://cms.epicode.com/items/content/${id}?fields=id,title,type,parent,sort,is_translated,summary,markdown,body,url,video_duration,embed_type`, {
             credentials: 'include',
             headers: { Authorization: `Bearer ${tok}` }
         });
@@ -1728,12 +2163,13 @@ ${errLines}
         return out;
     }
 
+    // Restituisce { ok, text, error } — caller può decidere se fallback al testo originale
     async function aiRework(text, lang, anthropicKey, model = 'claude-sonnet-4-6') {
-        if (!anthropicKey || !text) return text;
+        if (!anthropicKey || !text) return { ok: true, text, error: null };
         const langName = lang === 'it' ? 'italiano' : 'english';
         const prompt = `Riassumi e riorganizza i seguenti appunti di lezione universitaria in ${langName}, mantenendo la struttura markdown (titoli, elenchi, code blocks). Sii esaustivo ma compatto. Mantieni i termini tecnici originali. Restituisci solo il markdown.\n\n---\n\n${text}`;
         try {
-            const r = await fetch('https://api.anthropic.com/v1/messages', {
+            const r = await _fetchWithTimeout('https://api.anthropic.com/v1/messages', {
                 method: 'POST',
                 headers: {
                     'x-api-key': anthropicKey,
@@ -1742,11 +2178,22 @@ ${errLines}
                     'anthropic-dangerous-direct-browser-access': 'true'
                 },
                 body: JSON.stringify({ model, max_tokens: 4000, messages: [{ role: 'user', content: prompt }] })
-            });
-            if (!r.ok) { console.warn('[EpicodeFlow] AI HTTP', r.status); return text; }
+            }, 60000);
+            if (!r.ok) {
+                const err = await r.json().catch(() => ({}));
+                const msg = `HTTP ${r.status} ${err.error?.message || err.message || ''}`.trim();
+                console.warn('[EpicodeFlow] AI', msg);
+                return { ok: false, text, error: msg };
+            }
             const j = await r.json();
-            return j.content?.[0]?.text || text;
-        } catch (e) { console.warn('[EpicodeFlow] AI err', e); return text; }
+            const out = j.content?.[0]?.text;
+            if (!out) return { ok: false, text, error: 'risposta vuota' };
+            return { ok: true, text: out, error: null };
+        } catch (e) {
+            const msg = e.name === 'AbortError' ? 'timeout (60s)' : (e.message || String(e));
+            console.warn('[EpicodeFlow] AI err', msg);
+            return { ok: false, text, error: msg };
+        }
     }
 
     function langsArrayFromOpt(opt) {
@@ -1797,8 +2244,19 @@ ${errLines}
     }
 
     // ---------- Notion ----------
-    async function notionFetch(path, opts = {}, notionKey) {
-        const r = await fetch(`https://api.notion.com/v1${path}`, {
+    // Throttle: Notion API limita ~3 req/sec. Tieni delay 350ms tra calls + retry su 429.
+    const NOTION_MIN_DELAY_MS = 350;
+    const NOTION_MAX_CHILDREN_PER_REQ = 100; // limite hard Notion API
+    let _notionLastReqTs = 0;
+
+    async function notionFetch(path, opts = {}, notionKey, _retryCount = 0) {
+        // Throttle pre-call
+        const now = Date.now();
+        const wait = _notionLastReqTs + NOTION_MIN_DELAY_MS - now;
+        if (wait > 0) await new Promise(res => setTimeout(res, wait));
+        _notionLastReqTs = Date.now();
+
+        const r = await _fetchWithTimeout(`https://api.notion.com/v1${path}`, {
             ...opts,
             headers: {
                 'Authorization': `Bearer ${notionKey}`,
@@ -1807,9 +2265,31 @@ ${errLines}
                 ...(opts.headers || {})
             }
         });
+
+        // Retry su 429 (rate limit) e 5xx transient — max 3 tentativi con backoff esponenziale
+        if ((r.status === 429 || r.status >= 500) && _retryCount < 3) {
+            const retryAfterHeader = r.headers.get('Retry-After');
+            const retryAfterMs = retryAfterHeader
+                ? Math.min(30000, parseFloat(retryAfterHeader) * 1000)
+                : Math.min(8000, 500 * Math.pow(2, _retryCount));
+            await new Promise(res => setTimeout(res, retryAfterMs));
+            return notionFetch(path, opts, notionKey, _retryCount + 1);
+        }
+
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(`Notion ${path}: ${j.message || r.status}`);
         return j;
+    }
+
+    // Append children chunked per rispetto limite 100 blocchi/request
+    async function notionAppendChildrenChunked(blockId, children, notionKey) {
+        for (let i = 0; i < children.length; i += NOTION_MAX_CHILDREN_PER_REQ) {
+            const chunk = children.slice(i, i + NOTION_MAX_CHILDREN_PER_REQ);
+            await notionFetch(`/blocks/${blockId}/children`, {
+                method: 'PATCH',
+                body: JSON.stringify({ children: chunk })
+            }, notionKey);
+        }
     }
 
     function paragraphBlock(content) {
@@ -1855,13 +2335,13 @@ ${errLines}
         }, notionKey);
         const rootId = root.id;
 
-        // Per ogni item ordinato, appendi blocks con batching
+        // Per ogni item ordinato, appendi blocks con batching (chunked auto a 100/req)
         const lessonPageMap = {};
         let batch = [];
         let count = 0;
         const flush = async () => {
             if (batch.length === 0) return;
-            await notionFetch(`/blocks/${rootId}/children`, { method: 'PATCH', body: JSON.stringify({ children: batch }) }, notionKey);
+            await notionAppendChildrenChunked(rootId, batch, notionKey);
             batch = [];
         };
         for (const item of ordered) {
@@ -1893,7 +2373,7 @@ ${errLines}
         let batch = [];
         const flush = async () => {
             if (batch.length === 0) return;
-            await notionFetch(`/blocks/${rootPageId}/children`, { method: 'PATCH', body: JSON.stringify({ children: batch }) }, notionKey);
+            await notionAppendChildrenChunked(rootPageId, batch, notionKey);
             batch = [];
         };
         let count = 0;
@@ -1921,12 +2401,13 @@ ${errLines}
         let courseTitle = `Corso ${courseId}`;
         try {
             const tok = localStorage.getItem('auth_token');
-            const r = await fetch(`https://cms.epicode.com/items/courses/${courseId}?fields=id,title`, { headers: { Authorization: `Bearer ${tok}` } });
+            const r = await _fetchWithTimeout(`https://cms.epicode.com/items/courses/${courseId}?fields=id,title`, { headers: { Authorization: `Bearer ${tok}` } });
             const j = await r.json();
             if (j.data?.title) courseTitle = j.data.title;
         } catch (_) {}
 
         const textByLang = {};
+        const aiErrors = []; // accumula errori aiRework per surfacing finale
         const leafTypes = new Set(['embed', 'markdown', 'article', 'meeting', 'quiz', 'project', 'openEnded', 'nps', 'course_nps']);
         const leaves = ordered.filter(o => leafTypes.has(o.type));
         let i = 0;
@@ -1942,7 +2423,13 @@ ${errLines}
                 }
                 if (aiRewrite && anthropicKey) {
                     for (const lang of langs) {
-                        if (t[lang]) t[lang] = await aiRework(t[lang], lang, anthropicKey);
+                        if (t[lang]) {
+                            const res = await aiRework(t[lang], lang, anthropicKey);
+                            t[lang] = res.text; // su errore mantiene originale
+                            if (!res.ok) {
+                                aiErrors.push(`${item.title || item.id}/${lang}: ${res.error}`);
+                            }
+                        }
                     }
                 }
                 textByLang[item.id] = t;
@@ -1950,7 +2437,7 @@ ${errLines}
                 console.warn('[EpicodeFlow] fetch detail err', item.id, e.message);
             }
         }
-        return { courseId, courseTitle, ordered, textByLang };
+        return { courseId, courseTitle, ordered, textByLang, aiErrors };
     }
 
     function showExtractStatus(msg, color) {
@@ -1961,11 +2448,13 @@ ${errLines}
     async function runExtract({ mode }) {
         isExtracting = true;
         updateStateIcon();
+        tickStayawake();
         try {
             return await runExtractInner({ mode });
         } finally {
             isExtracting = false;
             updateStateIcon();
+            tickStayawake();
         }
     }
 
@@ -2048,6 +2537,13 @@ ${errLines}
         courseState.lastRun = Date.now();
         settings.state[dataset.courseId] = courseState;
         await extractSaveState(settings.state);
+
+        // Surface errori aiRework (se ce ne sono): testo originale già salvato come fallback
+        if (dataset.aiErrors && dataset.aiErrors.length > 0) {
+            const sample = dataset.aiErrors.slice(0, 3).join(' | ');
+            const more = dataset.aiErrors.length > 3 ? ` +${dataset.aiErrors.length - 3}` : '';
+            showExtractStatus(`⚠ AI rework fallito su ${dataset.aiErrors.length} lezione/i (testo originale salvato): ${sample}${more}`, '#f59e0b');
+        }
     }
 
     // ---------- UI modal ----------
@@ -2117,7 +2613,8 @@ ${errLines}
         if (!body || document.getElementById('m-version-footer')) return;
         let ver = '';
         try { ver = chrome.runtime.getManifest().version; } catch (_) {}
-        const verShort = `v${(ver || '').split('.')[0] || ver}`;
+        // Mostra versione completa (es. v64.4, non solo v64)
+        const verShort = `v${ver || '?'}`;
         const v = document.createElement('div');
         v.id = 'm-version-footer';
         v.style.cssText = 'display:grid;grid-template-columns:2fr 2fr 1fr;gap:4px;align-items:stretch;margin-top:6px;padding-top:4px;border-top:1px dashed #2a1054;font-family:monospace;';

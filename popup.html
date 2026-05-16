@@ -73,20 +73,24 @@
 <body>
 <h2><img src="icon.svg" width="20" height="20" style="vertical-align:middle;margin-right:6px;">EpiDuck</h2>
 
-<div id="enabled-row" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#f8f4ff;border:1px solid #e0d5f5;border-radius:6px;margin-bottom:14px;">
-  <label class="switch" style="position:relative;display:inline-block;width:42px;height:22px;margin:0;flex-shrink:0;">
-    <input type="checkbox" id="enabled-toggle" style="opacity:0;width:0;height:0;padding:0;border:0;">
-    <span id="enabled-slider" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#ccc;border-radius:22px;transition:.2s;"></span>
-  </label>
+<div id="enabled-row" style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:#f8f4ff;border:1px solid #e0d5f5;border-radius:6px;margin-bottom:14px;">
+  <button id="power-btn" title="Accendi/spegni globalmente" aria-label="Toggle EpiDuck on/off" style="width:48px;height:48px;flex-shrink:0;border-radius:50%;border:2px solid #ccc;background:#f3f4f6;color:#9ca3af;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;margin:0;transition:all .15s;">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+      <line x1="12" y1="2" x2="12" y2="12"/>
+    </svg>
+  </button>
   <div style="flex:1;">
-    <div style="font-weight:bold;font-size:12px;color:#222;">Estensione attiva</div>
-    <div id="enabled-state" style="font-size:10px;color:#888;">—</div>
+    <div style="font-weight:bold;font-size:13px;color:#222;">EpiDuck</div>
+    <div id="enabled-state" style="font-size:11px;color:#888;">—</div>
   </div>
+  <input type="checkbox" id="enabled-toggle" style="display:none;">
 </div>
 <style>
-  #enabled-slider::before { content: ''; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: .2s; }
-  #enabled-toggle:checked + #enabled-slider { background: #2ecc71; }
-  #enabled-toggle:checked + #enabled-slider::before { transform: translateX(20px); }
+  #power-btn.is-on { background: #ecfdf5; border-color: #10b981; color: #10b981; box-shadow: 0 0 0 4px rgba(16,185,129,0.12); }
+  #power-btn.is-off { background: #fef2f2; border-color: #ef4444; color: #ef4444; }
+  #power-btn:hover { transform: scale(1.05); }
+  #power-btn:active { transform: scale(0.95); }
 </style>
 
 <label for="notion-key">Notion API Key</label>
