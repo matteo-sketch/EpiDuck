@@ -112,6 +112,8 @@ ZIP build CWS: `~/Documents/epiduck-v<X>.zip` (escludi `.git`, `*.md`, `*.pem`).
 
 ## 9. Workflow release
 
+> ⚠️ **REGOLA NON NEGOZIABILE**: ogni push a `main` richiede SEMPRE step 11 (commit Notion). Senza riga DB versioni la release è incompleta.
+
 1. Modifica codice su branch `feat/*` o `fix/*`
 2. Bump `manifest.json` version
 3. `git commit -m "<conv commit>"` con Co-Authored-By footer
@@ -122,7 +124,7 @@ ZIP build CWS: `~/Documents/epiduck-v<X>.zip` (escludi `.git`, `*.md`, `*.pem`).
 8. `git push origin main && git push origin v<X.Y>`
 9. Build ZIP: `cd ~/Documents && rm -f epiduck-v<X>.zip && zip -rq epiduck-v<X>.zip epicduck -x "epicduck/.git/*" -x "epicduck/.DS_Store" -x "epicduck/*.pem" -x "epicduck/STORE_LISTING.md" -x "epicduck/PRIVACY.md" -x "epicduck/README.md" -x "epicduck/.gitignore"`
 10. `gh release create v<X.Y> --title "..." --notes "..." ~/Documents/epiduck-v<X>.zip`
-11. Notion: crea riga in DB versioni (data_source_id sopra) con Name, changelog, Files & media URL
+11. **🔴 OBBLIGATORIO**: Notion → crea riga in DB versioni (data_source_id `35e3bdcd-01e4-807b-9e10-000b51d51374`) con `Name` (es. "v64.3"), `changelog` (riassunto), `Files & media` (URL .zip del release GitHub). Senza questo step la release NON è completa.
 12. (Se CWS pubblicato) upload ZIP su Chrome Web Store Dashboard
 
 ## 10. Risorse esterne
